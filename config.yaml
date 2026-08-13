@@ -1,0 +1,29 @@
+# MyVoc 配置文件
+# 复制此文件到项目根目录，根据需要修改
+
+# 背诵设置
+learning:
+  auto_mode: false          # 默认手动模式
+  auto_interval_seconds: 5  # 自动模式下每个单词显示时长
+  show_phonetic: true       # 是否显示音标
+  show_meaning_first: false # 背诵时先显示中文再出英文
+
+# 考核设置
+testing:
+  case_sensitive: false     # 大小写不敏感
+  typo_tolerance: 0         # 允许 0 个字母误差（MVP 精确匹配）
+
+# 艾宾浩斯参数
+ebbinghaus:
+  base_intervals: [0, 1, 2, 4, 7, 15, 30]
+  max_stage: 7
+  default_ease_factor: 2.5
+
+# 词典源
+dictionary:
+  provider: youdao          # youdao / jinshan / offline
+  timeout_seconds: 5
+
+# 数据库路径
+database:
+  path: ""                  # 空字符串 → 使用默认路径 ~/.myvoc/myvoc.db

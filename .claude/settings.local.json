@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda --version)",
+      "Bash(conda env *)",
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "Bash(where conda *)",
+      "Bash(conda clean *)",
+      "Bash(conda create *)",
+      "Bash(conda update *)",
+      "Bash(rm -rf /c/ProgramData/Miniconda3/pkgs/*.conda /c/ProgramData/Miniconda3/pkgs/*.tar.bz2)",
+      "Bash(rm -rf /c/ProgramData/Miniconda3/pkgs/cache)",
+      "Bash(conda run *)",
+      "Bash(python *)"
+    ]
+  }
+}
