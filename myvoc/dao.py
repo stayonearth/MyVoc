@@ -75,6 +75,35 @@ def get_words_by_ids(word_ids: list[int]) -> list[Word]:
     return [Word(**dict(r)) for r in rows]
 
 
+def get_all_words() -> list[Word]:
+    """获取所有单词（按 id 排序）"""
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM words ORDER BY id").fetchall()
+    return [Word(**dict(r)) for r in rows]
+
+
+def update_audio_url(word: str, audio_url: str) -> bool:
+    """更新单词的 audio_url 字段"""
+    conn = _conn()
+    cursor = conn.execute(
+        "UPDATE words SET audio_url = ? WHERE word = ?",
+        (audio_url, word.lower()),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
+def update_word_phonetic(word: str, phonetic: str) -> bool:
+    """更新单词的 phonetic 字段"""
+    conn = _conn()
+    cursor = conn.execute(
+        "UPDATE words SET phonetic = ? WHERE word = ?",
+        (phonetic, word.lower()),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 # ==================== LearningRecord DAO ====================
 
 def get_or_create_record(word_id: int, learn_date: date | None = None) -> LearningRecord:

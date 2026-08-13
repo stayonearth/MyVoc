@@ -4,14 +4,23 @@
     "auto_mode": false,
     "auto_interval_seconds": 5,
     "show_phonetic": true,
-    "show_meaning_first": false
+    "show_meaning_first": false,
+    "play_audio": true
   },
   "testing": {
     "case_sensitive": false,
     "typo_tolerance": 0
   },
   "ebbinghaus": {
-    "base_intervals": [0, 1, 2, 4, 7, 15, 30],
+    "base_intervals": [
+      0,
+      1,
+      2,
+      4,
+      7,
+      15,
+      30
+    ],
     "max_stage": 7,
     "default_ease_factor": 2.5
   },

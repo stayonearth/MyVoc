@@ -13,7 +13,10 @@
       "Bash(rm -rf /c/ProgramData/Miniconda3/pkgs/cache)",
       "Bash(conda run *)",
       "Bash(python *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(pip install *)",
+      "Bash(pip uninstall *)",
+      "Bash(pip show *)"
     ]
   }
 }

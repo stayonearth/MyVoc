@@ -86,9 +86,10 @@ def add(skip_unknown: bool) -> None:
 @click.option("--auto", is_flag=True, help="自动模式：每个单词显示指定时长后自动切换")
 @click.option("--count", type=int, default=None, help="只背诵前 N 个单词")
 def learn(auto: bool, count: int | None) -> None:
-    """背诵模式：依次显示单词的英文、音标、中文释义"""
+    """背诵模式：依次显示单词的英文、音标、中文释义，并播放发音"""
     from myvoc.dao import get_today_session, get_words_by_ids
     from myvoc.config import get as conf_get
+    from myvoc.audio import play_audio
     import time
 
     session = get_today_session()
@@ -110,12 +111,15 @@ def learn(auto: bool, count: int | None) -> None:
     click.echo()
 
     auto_interval = conf_get("learning.auto_interval_seconds", 5)
+    audio_enabled = conf_get("learning.play_audio", False)
 
     for idx, word in enumerate(words, 1):
         click.clear()
         click.echo(f"== 背诵模式 · {mode_text} · 第 {idx} / {total} 个 ==")
         click.echo("-" * 40)
         click.echo(f"\n  {word.word}")
+        if audio_enabled and word.audio_url:
+            play_audio(word.audio_url, auto_mode=auto)
         if word.phonetic:
             click.echo(f"  {word.phonetic}")
         if word.meaning:
@@ -271,3 +275,63 @@ def delete(words):
         click.echo(f"  已删除：{', '.join(deleted)}")
     if not_found:
         click.echo(f"  未找到：{', '.join(not_found)}")
+
+
+@cli.command()
+@click.option("--count", type=int, default=None, help="只补全前 N 个单词")
+@click.option("--phonetic", is_flag=True, help="同时补全音标字段")
+def addaudio(count: int | None, phonetic: bool) -> None:
+    """补全单词的音频 URL（及可选的音标）
+
+    用法:
+      myvoc addaudio               # 补全所有单词
+      myvoc addaudio --count 10    # 只补全前 10 个
+      myvoc addaudio --phonetic    # 同时补全音标
+    """
+    from myvoc.dao import get_all_words, update_audio_url, update_word_phonetic
+    from myvoc.dictionary import fetch_audio_url
+    import time
+
+    words = get_all_words()
+
+    if count:
+        words = words[:count]
+
+    total = len(words)
+    ok_count = 0
+    skip_count = 0
+    fail_count = 0
+
+    click.echo("== 音频补全模式 ==")
+    click.echo()
+
+    for idx, word in enumerate(words, 1):
+        click.echo(f"[{idx}/{total}] {word.word:<15} ", nl=False)
+
+        # 已有音频则跳过
+        if word.audio_url:
+            click.echo("[SKIP] 已有音频")
+            skip_count += 1
+            continue
+
+        # 查询 API
+        result = fetch_audio_url(word.word)
+        if result:
+            update_audio_url(word.word, result["audio_url"])
+            click.echo("[OK]")
+            ok_count += 1
+
+            if phonetic and result["phonetic"]:
+                update_word_phonetic(word.word, result["phonetic"])
+        else:
+            click.echo("[FAIL] 未找到")
+            fail_count += 1
+
+        # 控制请求频率（0.5 秒间隔）
+        time.sleep(0.5)
+
+    # 统计
+    click.echo()
+    click.echo("=" * 40)
+    click.echo(f"补全完成：成功 {ok_count}，跳过 {skip_count}，失败 {fail_count}")
+    click.echo("=" * 40)

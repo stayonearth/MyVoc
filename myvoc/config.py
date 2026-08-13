@@ -19,6 +19,7 @@ _DEFAULTS = {
         "auto_interval_seconds": 5,
         "show_phonetic": True,
         "show_meaning_first": False,
+        "play_audio": False,
     },
     "testing": {
         "case_sensitive": False,
