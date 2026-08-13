@@ -39,6 +39,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             word       TEXT    UNIQUE NOT NULL,
             phonetic   TEXT    DEFAULT '',
             meaning    TEXT    DEFAULT '',
+            audio_url  TEXT    DEFAULT '',
             created_at DATETIME DEFAULT (datetime('now')),
             source     TEXT    DEFAULT 'api'
         );

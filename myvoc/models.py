@@ -16,6 +16,7 @@ class Word:
     meaning: str = ""
     created_at: Optional[datetime] = None
     source: str = "api"  # api | manual
+    audio_url: str = ""
 
 
 @dataclass
