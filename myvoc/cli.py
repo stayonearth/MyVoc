@@ -30,16 +30,25 @@ def add(skip_unknown: bool) -> None:
     import sys
     from myvoc.dictionary import lookup_word
     from myvoc.dao import upsert_word, create_session
+    from rich.console import Console
+    from rich.status import Status
 
-    click.echo("[录入模式] 输入完成后按 Ctrl+D (Unix) / Ctrl+Z (Windows) 结束")
-    click.echo("-" * 50)
+    console = Console()
+    console.print("[录入模式] 输入完成后按 [cyan]Ctrl+Z[/cyan] (Windows) 或 [cyan]Ctrl+D[/cyan] (Unix) 结束")
+    console.print("-" * 50)
 
     added = []
     failed = []
     manual_added = []
 
-    # 逐行读取 stdin
-    for line in sys.stdin:
+    while True:
+        # 先输出提示符（Rich Console 会自动 flush stdout）
+        console.print("\n(输入单词，或 Ctrl+Z 结束) → ", soft_wrap=True, end="")
+        try:
+            # input() 的 EOFError 最可靠，且与 Rich 输出不冲突
+            line = input()
+        except (EOFError, KeyboardInterrupt):
+            break
         words_text = line.strip()
         if not words_text:
             continue
@@ -49,22 +58,24 @@ def add(skip_unknown: bool) -> None:
             if not word:
                 continue
 
-            # 查词
-            info = lookup_word(word)
+            # 查词：显示动态加载提示
+            with Status(f"  正在查询 [bold]{word}[/bold]...", spinner="dots"):
+                info = lookup_word(word)
+
             if info:
                 upsert_word(word, info["phonetic"], info["meaning"])
                 added.append(word)
-                click.echo(f"  [OK] {word}  {info['phonetic']}  {info['meaning']}")
+                console.print(f"  [green][OK][reset] {word}  {info['phonetic']}  {info['meaning']}")
             else:
                 meaning = click.prompt(f"  [{word}] 未查询到释义，请手动输入中文释义", default="")
                 if meaning:
                     upsert_word(word, "", meaning, source="manual")
                     added.append(word)
                     manual_added.append(word)
-                    click.echo(f"  [OK] {word}  (手动)  {meaning}")
+                    console.print(f"  [green][OK][reset] {word}  (手动)  {meaning}")
                 elif not skip_unknown:
                     failed.append(word)
-                    click.echo(f"  [SKIP] {word}（未提供释义且 --skip-unknown 未设置）")
+                    console.print(f"  [yellow][SKIP][reset] {word}（未提供释义且 --skip-unknown 未设置）")
 
     # 创建会话
     if added:
@@ -82,16 +93,84 @@ def add(skip_unknown: bool) -> None:
     click.echo(msg)
 
 
+# ---------------------------------------------------------------------------
+# 背诵模式导航辅助函数
+# ---------------------------------------------------------------------------
+
+
+def _show_manual_nav(console: "Console", idx: int, total: int) -> None:
+    """显示手动模式的导航提示"""
+    hint = f"[dim]  [{idx}/{total}]"
+    if idx > 1:
+        hint += " [↑]/[PgUp] 上一个"
+    else:
+        hint += " [↑]/[PgUp] 已在第一个"
+    hint += " | [↓]/[PgDn]/[回车] 下一个"
+    hint += " | [q] 退出[/dim]"
+    console.print(hint)
+
+
+def _read_key_manual(console: "Console", current_idx: int, word_count: int) -> int:
+    """读取手动模式下的按键，返回下一个单词的索引（0-based）
+
+    返回 -1 表示退出。
+    返回 word_count 表示已到达末尾。
+    """
+    import msvcrt
+
+    while True:
+        key = msvcrt.getch()
+
+        # ── 普通字符 ──────────────────────────────
+        if key != b'\x00' and key != b'\xe0':
+            ch = key.decode('ascii', errors='ignore').lower()
+            if ch == 'q':
+                console.print("\n已退出背诵模式。")
+                return -1  # 退出信号
+            if ch == '\r' or ch == '\n':  # Enter
+                if current_idx >= word_count - 1:
+                    return word_count  # 已到最后
+                return current_idx + 1
+
+        # ── 扩展键（方向键 / 翻页键）──────────────
+        ext = msvcrt.getch()
+        key_combo = key + ext
+
+        if key_combo == b'\xe0\x48':     # ↑ PageUp
+            if current_idx > 0:
+                return current_idx - 1
+            console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
+            return current_idx
+        if key_combo == b'\xe0\x50':     # ↓ PageDown
+            return min(current_idx + 1, word_count - 1)
+        if key_combo == b'\xe0\x49':     # PgUp
+            if current_idx > 0:
+                return current_idx - 1
+            console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
+            return current_idx
+        if key_combo == b'\xe0\x51':     # PgDn
+            return min(current_idx + 1, word_count - 1)
+
+
 @cli.command()
 @click.option("--auto", is_flag=True, help="自动模式：每个单词显示指定时长后自动切换")
 @click.option("--count", type=int, default=None, help="只背诵前 N 个单词")
 def learn(auto: bool, count: int | None) -> None:
-    """背诵模式：依次显示单词的英文、音标、中文释义，并播放发音"""
+    """背诵模式：依次显示单词的英文、音标、中文释义，并播放发音
+
+    手动模式导航：
+        [回车] / [↓] / [PgDn] 下一个
+        [↑] / [PgUp] 上一个（第一个时停留并提示）
+        [q] 退出
+    """
     from myvoc.dao import get_today_session, get_words_by_ids
     from myvoc.config import get as conf_get
     from myvoc.audio import play_audio
+    from rich.console import Console
+    import sys
     import time
 
+    console = Console()
     session = get_today_session()
     if not session or not session.word_ids:
         click.echo("今天还没有录入单词，请先运行 `myvoc add`。")
@@ -107,40 +186,38 @@ def learn(auto: bool, count: int | None) -> None:
 
     total = len(words)
     mode_text = "自动" if auto else "手动"
-    click.echo(f"== 背诵模式 · {mode_text} · 第 1 / {total} 个 ==")
-    click.echo()
+    console.print(f"\n[bold]== 背诵模式 · {mode_text} · 第 1 / {total} 个 ==[/bold]\n")
 
     auto_interval = conf_get("learning.auto_interval_seconds", 5)
     audio_enabled = conf_get("learning.play_audio", False)
 
-    for idx, word in enumerate(words, 1):
-        click.clear()
-        click.echo(f"== 背诵模式 · {mode_text} · 第 {idx} / {total} 个 ==")
-        click.echo("-" * 40)
-        click.echo(f"\n  {word.word}")
+    idx = 0
+    while idx < total:
+        word = words[idx]
+        console.clear()
+        console.print(f"[bold]== 背诵模式 · {mode_text} · 第 {idx + 1} / {total} 个 ==[/bold]")
+        console.print("-" * 40)
+        console.print(f"\n  [bold]{word.word}[/bold]")
         if audio_enabled and word.audio_url:
             play_audio(word.audio_url, auto_mode=auto)
         if word.phonetic:
-            click.echo(f"  {word.phonetic}")
+            console.print(f"  {word.phonetic}")
         if word.meaning:
-            click.echo(f"\n  {word.meaning}")
+            console.print(f"\n  {word.meaning}")
         else:
-            click.echo(f"\n  （无释义）")
-        click.echo("-" * 40)
+            console.print(f"\n  （无释义）")
+        console.print("-" * 40)
 
         if auto:
-            click.echo(f"[{auto_interval}秒后自动切换] [q] 退出")
+            console.print(f"[dim][{auto_interval}秒后自动切换] [q] 退出[/dim]")
             try:
                 time.sleep(auto_interval)
             except KeyboardInterrupt:
-                click.echo("\n已退出背诵模式。")
+                console.print("\n已退出背诵模式。")
                 return
         else:
-            click.echo("[回车] 下一个  [q] 退出")
-            key = click.prompt("", default="", show_default=False).strip()
-            if key.lower() == 'q':
-                click.echo("已退出背诵模式。")
-                return
+            _show_manual_nav(console, idx + 1, total)
+            idx = _read_key_manual(console, idx, total)
 
 
 @cli.command()
