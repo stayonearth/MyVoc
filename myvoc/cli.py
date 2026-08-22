@@ -102,10 +102,10 @@ def _show_manual_nav(console: "Console", idx: int, total: int) -> None:
     """显示手动模式的导航提示"""
     hint = f"[dim]  [{idx}/{total}]"
     if idx > 1:
-        hint += " [↑]/[PgUp] 上一个"
+        hint += " [PgUp] 上一个"
     else:
-        hint += " [↑]/[PgUp] 已在第一个"
-    hint += " | [↓]/[PgDn]/[回车] 下一个"
+        hint += " [PgUp] 已在第一个"
+    hint += " | [PgDn]/[回车] 下一个"
     hint += " | [q] 退出[/dim]"
     console.print(hint)
 
@@ -123,33 +123,38 @@ def _read_key_manual(console: "Console", current_idx: int, word_count: int) -> i
 
         # ── 普通字符 ──────────────────────────────
         if key != b'\x00' and key != b'\xe0':
+            # Enter 键：进入下一个单词
+            if key in (b'\x0d', b'\x0a'):
+                if current_idx >= word_count - 1:
+                    return word_count  # 已到最后一个，退出循环
+                return current_idx + 1
             ch = key.decode('ascii', errors='ignore').lower()
             if ch == 'q':
                 console.print("\n已退出背诵模式。")
                 return -1  # 退出信号
-            if ch == '\r' or ch == '\n':  # Enter
-                if current_idx >= word_count - 1:
-                    return word_count  # 已到最后
-                return current_idx + 1
 
         # ── 扩展键（方向键 / 翻页键）──────────────
         ext = msvcrt.getch()
         key_combo = key + ext
 
-        if key_combo == b'\xe0\x48':     # ↑ PageUp
+        if key_combo == b'\xe0\x48':     # ↑ 上箭头
             if current_idx > 0:
                 return current_idx - 1
             console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
             return current_idx
-        if key_combo == b'\xe0\x50':     # ↓ PageDown
-            return min(current_idx + 1, word_count - 1)
-        if key_combo == b'\xe0\x49':     # PgUp
+        if key_combo == b'\xe0\x50':     # ↓ 下箭头
+            if current_idx >= word_count - 1:
+                return word_count  # 已到最后一个，退出循环
+            return current_idx + 1
+        if key_combo == b'\xe0\x21':     # PgUp
             if current_idx > 0:
                 return current_idx - 1
             console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
             return current_idx
-        if key_combo == b'\xe0\x51':     # PgDn
-            return min(current_idx + 1, word_count - 1)
+        if key_combo == b'\xe0\x22':     # PgDn
+            if current_idx >= word_count - 1:
+                return word_count  # 已到最后一个，退出循环
+            return current_idx + 1
 
 
 @cli.command()
@@ -159,9 +164,9 @@ def learn(auto: bool, count: int | None) -> None:
     """背诵模式：依次显示单词的英文、音标、中文释义，并播放发音
 
     手动模式导航：
-        [回车] / [↓] / [PgDn] 下一个
+        [↓] / [PgDn] 下一个
         [↑] / [PgUp] 上一个（第一个时停留并提示）
-        [q] 退出
+        [回车] / [q] 退出
     """
     from myvoc.dao import get_today_session, get_words_by_ids
     from myvoc.config import get as conf_get
@@ -217,7 +222,10 @@ def learn(auto: bool, count: int | None) -> None:
                 return
         else:
             _show_manual_nav(console, idx + 1, total)
-            idx = _read_key_manual(console, idx, total)
+            result = _read_key_manual(console, idx, total)
+            if result == -1:
+                return
+            idx = result
 
 
 @cli.command()
@@ -229,6 +237,7 @@ def test(count: int | None) -> None:
     答错 -> stage-2，难度系数降低
     """
     from myvoc.dao import get_test_queue, update_record
+    from myvoc.audio import play_audio
 
     queue = get_test_queue()
     if not queue:
@@ -264,10 +273,16 @@ def test(count: int | None) -> None:
             update_record(word.id, is_correct=True)
             correct_count += 1
             click.echo(f"\n  [正确] {word.word}")
+            if word.phonetic:
+                click.echo(f"  {word.phonetic}")
         else:
             update_record(word.id, is_correct=False)
             wrong_count += 1
             click.echo(f"\n  [错误] 正确答案：{word.word}")
+            if word.phonetic:
+                click.echo(f"  {word.phonetic}")
+            if word.audio_url:
+                play_audio(word.audio_url)
             if word.meaning:
                 click.echo(f"  释义：{word.meaning}")
             wrong_words.append(word)
@@ -293,8 +308,14 @@ def test(count: int | None) -> None:
 
             if answer.lower() == word.word.lower():
                 click.echo(f"\n  [正确] {word.word}")
+                if word.phonetic:
+                    click.echo(f"  {word.phonetic}")
             else:
                 click.echo(f"\n  [错误] 正确答案：{word.word}")
+                if word.phonetic:
+                    click.echo(f"  {word.phonetic}")
+                if word.audio_url:
+                    play_audio(word.audio_url)
                 if word.meaning:
                     click.echo(f"  释义：{word.meaning}")
             click.echo("-" * 50)
