@@ -135,17 +135,41 @@ def get_or_create_record(word_id: int, learn_date: date | None = None) -> Learni
 
 
 def update_record(word_id: int, is_correct: bool, learn_date: date | None = None) -> None:
-    """更新学习记录（答对/答错），驱动艾宾浩斯调度"""
+    """更新学习记录（答对/答错），驱动艾宾浩斯调度
+
+    查找该单词的最新学习记录并就地更新（不创建新记录）。
+    首次测试时创建一条新记录。
+    """
     if learn_date is None:
         learn_date = date.today()
 
-    record = get_or_create_record(word_id, learn_date)
     conn = _conn()
 
     from myvoc.config import get as conf_get
     base_intervals = conf_get("ebbinghaus.base_intervals", [0, 1, 2, 4, 7, 15, 30])
     ease_lower = 1.3
-    ease_upper = 3.0
+
+    # 查找该单词的最新记录（不按 learn_date 过滤，只按 id 倒序）
+    row = conn.execute(
+        "SELECT * FROM learning_records WHERE word_id = ? ORDER BY id DESC LIMIT 1",
+        (word_id,),
+    ).fetchone()
+
+    if row:
+        record = LearningRecord(**dict(row))
+    else:
+        # 首次测试：创建新记录
+        conn.execute(
+            """INSERT INTO learning_records
+               (word_id, learn_date, stage, ease_factor, interval, next_review_date)
+               VALUES (?, ?, 0, 2.5, 0, ?)""",
+            (word_id, learn_date.isoformat(), learn_date.isoformat()),
+        )
+        conn.commit()
+        record = get_or_create_record(word_id, learn_date)
+
+    # review_base 直接用传入的 learn_date（本身就是 date 对象）
+    review_base = learn_date.isoformat()
 
     if is_correct:
         new_stage = record.stage + 1
@@ -159,7 +183,7 @@ def update_record(word_id: int, is_correct: bool, learn_date: date | None = None
                last_review_at = datetime('now')
                WHERE id = ?""",
             (new_stage, record.ease_factor, new_interval,
-             learn_date.isoformat(), new_interval, record.id),
+             review_base, new_interval, record.id),
         )
     else:
         new_stage = max(0, record.stage - 2)
@@ -172,7 +196,7 @@ def update_record(word_id: int, is_correct: bool, learn_date: date | None = None
                last_result = 'wrong',
                last_review_at = datetime('now')
                WHERE id = ?""",
-            (new_stage, new_ease, learn_date.isoformat(), record.id),
+            (new_stage, new_ease, review_base, record.id),
         )
 
     conn.commit()
@@ -257,32 +281,38 @@ def get_latest_record(word_id: int, learn_date: date | None = None) -> dict | No
 def get_test_queue() -> list[Word]:
     """生成今日考核队列
 
-    队列优先级：
-    1. 今日新学单词（从 daily_sessions）
-    2. 到期复习单词（next_review_date <= 今天，从 learning_records）
-    合并时按 word_id 去重，优先保留 stage 低的（复习进度靠前的）
+    队列组成：
+    1. 新词：今日会话中但没有任何学习记录的词
+    2. 到期复习：next_review_date <= 今天（从 learning_records 全局筛选）
+    合并去重，每个单词只出现一次（要么在新词，要么在复习中）
     """
     today = date.today().isoformat()
     conn = _conn()
 
-    # 1. 今日新学单词 ID
+    # 1. 今日会话中的所有单词 ID
     new_word_ids = get_today_word_ids()
 
-    # 2. 到期复习单词（排除已在新学中的）
+    # 2. "新词" = 今日会话中但无 learning_records 的词
+    if new_word_ids:
+        placeholders = ",".join("?" * len(new_word_ids))
+        reviewed_ids = conn.execute(
+            f"SELECT DISTINCT word_id FROM learning_records "
+            f"WHERE word_id IN ({placeholders})",
+            new_word_ids,
+        ).fetchall()
+        reviewed_set = {r["word_id"] for r in reviewed_ids}
+        new_word_ids = [wid for wid in new_word_ids if wid not in reviewed_set]
+
+    # 3. 到期复习单词（全局筛选，不限会话）
     overdue_rows = conn.execute(
-        """SELECT DISTINCT lr.word_id
-           FROM learning_records lr
-           INNER JOIN daily_sessions ds ON lr.learn_date = ds.session_date
-           WHERE lr.next_review_date <= ?
-             AND NOT EXISTS (
-               SELECT 1 FROM json_each(ds.word_ids) j
-               WHERE j.value = CAST(lr.word_id AS TEXT)
-             )""",
+        """SELECT DISTINCT word_id
+           FROM learning_records
+           WHERE next_review_date <= ?""",
         (today,),
     ).fetchall()
     review_word_ids = [r["word_id"] for r in overdue_rows]
 
-    # 3. 合并去重（新学优先，复习补充）
+    # 4. 合并去重（新词优先，复习补充）
     all_ids = list(new_word_ids)
     for wid in review_word_ids:
         if wid not in all_ids:

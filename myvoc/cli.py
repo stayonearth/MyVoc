@@ -307,10 +307,12 @@ def test(count: int | None) -> None:
                 break
 
             if answer.lower() == word.word.lower():
+                update_record(word.id, is_correct=True)
                 click.echo(f"\n  [正确] {word.word}")
                 if word.phonetic:
                     click.echo(f"  {word.phonetic}")
             else:
+                update_record(word.id, is_correct=False)
                 click.echo(f"\n  [错误] 正确答案：{word.word}")
                 if word.phonetic:
                     click.echo(f"  {word.phonetic}")
