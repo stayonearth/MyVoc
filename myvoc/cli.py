@@ -379,14 +379,12 @@ def delete(words):
 
 @cli.command()
 @click.option("--count", type=int, default=None, help="只补全前 N 个单词")
-@click.option("--phonetic", is_flag=True, help="同时补全音标字段")
-def addaudio(count: int | None, phonetic: bool) -> None:
-    """补全单词的音频 URL（及可选的音标）
+def addaudio(count: int | None) -> None:
+    """补全单词的音频 URL 及音标
 
     用法:
       myvoc addaudio               # 补全所有单词
       myvoc addaudio --count 10    # 只补全前 10 个
-      myvoc addaudio --phonetic    # 同时补全音标
     """
     from myvoc.dao import get_all_words, update_audio_url, update_word_phonetic
     from myvoc.dictionary import fetch_audio_url
@@ -421,7 +419,7 @@ def addaudio(count: int | None, phonetic: bool) -> None:
             click.echo("[OK]")
             ok_count += 1
 
-            if phonetic and result["phonetic"]:
+            if result["phonetic"]:
                 update_word_phonetic(word.word, result["phonetic"])
         else:
             click.echo("[FAIL] 未找到")
@@ -435,3 +433,237 @@ def addaudio(count: int | None, phonetic: bool) -> None:
     click.echo("=" * 40)
     click.echo(f"补全完成：成功 {ok_count}，跳过 {skip_count}，失败 {fail_count}")
     click.echo("=" * 40)
+
+
+# ---------------------------------------------------------------------------
+# 系统状态
+# ---------------------------------------------------------------------------
+
+
+def _print_srs_intro(console: "Console") -> None:
+    """打印艾宾浩斯 SRS 方法介绍"""
+    console.print("\n[dim]" + "-" * 52 + "[/dim]")
+    console.print("[bold]记忆方法：艾宾浩斯间隔重复（SRS）[/bold]\n")
+
+    console.print("  德国心理学家艾宾浩斯发现：遗忘在学习后立即开始，")
+    console.print("  且最初速度很快。间隔重复（Spaced Repetition System）")
+    console.print("  利用这一规律，在即将遗忘的临界点安排复习，从而")
+    console.print("  以最少次数把短期记忆转为长期记忆。\n")
+
+    console.print("[bold]当前系统的 SRS 参数：[/bold]")
+    from myvoc.config import get
+    base_intervals = get("ebbinghaus.base_intervals", [0, 1, 2, 4, 7, 15, 30])
+    max_stage = get("ebbinghaus.max_stage", 7)
+    ease_lower = 1.3
+
+    console.print("  * 阶段 0（新词）-> 今天复习")
+    for i in range(1, len(base_intervals)):
+        console.print(f"  * 阶段 {i} -> 间隔 {base_intervals[i]} 天复习")
+    console.print(f"  * 最大阶段：{max_stage}（达到后视为已毕业）")
+    console.print(f"  * 难度下限：ease factor {ease_lower}\n")
+
+    console.print("[bold]每次考核的影响：[/bold]")
+    console.print("  答对 -> 进入下一阶段，间隔按 base_intervals 递增")
+    console.print("  答错 -> 退回 2 个阶段，难度系数 -0.2（下次间隔变短）")
+    console.print("  难度系数越小，复习间隔越短，系统会更频繁地考你\n")
+
+    console.print("[bold]给你的学习建议：[/bold]")
+    console.print("  1. 每天坚持，不要积累大量到期单词 — 每天少量复习效果最好")
+    console.print("  2. 答错了不要沮丧，退回 2 阶意味着系统认为你需要更多练习")
+    console.print("  3. 如果某个词反复出错，尝试联想记忆法（编故事、拆词根）")
+    console.print("  4. 录入新词时尽量用完整释义，避免只记片段的浅层记忆")
+    console.print("  5. 用 [cyan]myvoc status[/cyan] 定期查看学习状态，及时调整节奏")
+
+
+@cli.command()
+def status() -> None:
+    """查看当前学习状态统计
+
+    显示词汇概况、阶段分布、常错词、到期复习提醒，
+    以及艾宾浩斯间隔重复方法说明。
+    """
+    from datetime import date
+    from myvoc.database import init_db
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    conn = init_db()
+
+    # ========================= 1. 系统概览 =========================
+    total_words = conn.execute("SELECT COUNT(*) AS cnt FROM words").fetchone()["cnt"]
+    today_str = date.today().isoformat()
+    session = conn.execute(
+        "SELECT * FROM daily_sessions WHERE session_date = ?", (today_str,)
+    ).fetchone()
+    total_records = conn.execute("SELECT COUNT(*) AS cnt FROM learning_records").fetchone()["cnt"]
+    total_sessions = conn.execute("SELECT COUNT(*) AS cnt FROM daily_sessions").fetchone()["cnt"]
+
+    console.rule("[bold]系统概览[/bold]")
+    console.print(f"  总词汇量：[bold]{total_words}[/bold] 个")
+    console.print(f"  今日录入：[bold]{session['total_words'] if session else 0}[/bold] 个")
+    console.print(f"  学习记录：[bold]{total_records}[/bold] 条")
+    console.print(f"  学习会话：[bold]{total_sessions}[/bold] 次")
+
+    # ========================= 2. 阶段分布 =========================
+    console.print()
+    console.rule("[bold]阶段分布[/bold]")
+
+    stage_rows = conn.execute(
+        "SELECT stage, COUNT(*) AS cnt FROM learning_records GROUP BY stage ORDER BY stage"
+    ).fetchall()
+
+    stage_labels = [
+        "新词（阶段 0）",
+        "1 天后复习",
+        "2 天后复习",
+        "4 天后复习",
+        "7 天后复习",
+        "15 天后复习",
+        "30 天后复习",
+        "已毕业",
+    ]
+
+    stage_map = {r["stage"]: r["cnt"] for r in stage_rows}
+    stages_displayed = []
+    for i in range(len(stage_labels)):
+        cnt = stage_map.get(i, 0)
+        stages_displayed.append(f"[{i}] {cnt} 个")
+    console.print("  ".join(stages_displayed))
+
+    # 未进入学习记录的单词数
+    learned_ids = conn.execute(
+        "SELECT DISTINCT word_id FROM learning_records"
+    ).fetchall()
+    learned_set = {r["word_id"] for r in learned_ids}
+    if len(learned_set) < total_words:
+        unlearned = total_words - len(learned_set)
+        console.print(f"  未开始学习：[bold]{unlearned}[/bold] 个\n")
+
+    # ========================= 3. 到期复习 & 新词 =========================
+    console.rule("[bold]复习提醒[/bold]")
+
+    overdue_rows = conn.execute(
+        """SELECT COUNT(*) AS cnt FROM learning_records
+           WHERE next_review_date <= ?""", (today_str,)
+    ).fetchone()
+
+    # 新词 = 今日会话中但无学习记录的
+    new_count = 0
+    if session:
+        new_ids = session["word_ids"] or []
+        if new_ids:
+            reviewed = conn.execute(
+                f"SELECT DISTINCT word_id FROM learning_records "
+                f"WHERE word_id IN ({','.join('?' * len(new_ids))})",
+                new_ids,
+            ).fetchall()
+            reviewed_set = {r["word_id"] for r in reviewed}
+            new_count = len([wid for wid in new_ids if wid not in reviewed_set])
+        else:
+            new_count = 0
+
+    console.print(f"  到期需复习：[bold]{overdue_rows['cnt']}[/bold] 个")
+    console.print(f"  新词待学：  [bold]{new_count}[/bold] 个\n")
+
+    # ========================= 4. 常错词 =========================
+    console.rule("[bold]常错词 TOP 10（错误次数最多）[/bold]")
+
+    wrong_rows = conn.execute(
+        """SELECT w.word, w.meaning, lr.wrong_count, lr.correct_count
+           FROM learning_records lr
+           JOIN words w ON lr.word_id = w.id
+           WHERE lr.wrong_count > 0
+           ORDER BY lr.wrong_count DESC
+           LIMIT 10"""
+    ).fetchall()
+
+    if not wrong_rows:
+        console.print("  [dim]暂无数据，先学习一些单词吧![/dim]\n")
+    else:
+        table = Table(show_header=True, header_style="bold", box=None)
+        table.add_column("#", style="dim", width=4)
+        table.add_column("单词", style="bold", max_width=15)
+        table.add_column("释义", max_width=35)
+        table.add_column("错误", justify="right", style="red")
+        table.add_column("正确", justify="right", style="green")
+        for idx, r in enumerate(wrong_rows, 1):
+            wc = r["wrong_count"]
+            cc = r["correct_count"]
+            ratio = f"{cc * 100 // (cc + wc)}%" if (cc + wc) > 0 else "—"
+            meaning = (r["meaning"] or "（无释义）").replace("\n", " ")
+            table.add_row(
+                str(idx),
+                r["word"],
+                meaning[:35],
+                f"[red]{wc}[/red]",
+                f"[green]{cc} ({ratio})[/green]",
+            )
+        console.print(table)
+
+    # ========================= 5. 易错词 =========================
+    console.print()
+    console.rule("[bold]易错词 TOP 20（正确率最低，至少 2 条记录）[/bold]")
+
+    accuracy_rows = conn.execute(
+        """SELECT w.word, w.meaning, lr.correct_count, lr.wrong_count,
+                  CAST(lr.correct_count AS REAL) / (lr.correct_count + lr.wrong_count) AS accuracy
+           FROM learning_records lr
+           JOIN words w ON lr.word_id = w.id
+           GROUP BY w.id
+           HAVING lr.correct_count + lr.wrong_count >= 2
+           ORDER BY accuracy ASC
+           LIMIT 20"""
+    ).fetchall()
+
+    if not accuracy_rows:
+        console.print("  [dim]暂无数据，多练习几轮再来看![/dim]\n")
+    else:
+        table = Table(show_header=True, header_style="bold", box=None)
+        table.add_column("#", style="dim", width=4)
+        table.add_column("单词", style="bold", max_width=15)
+        table.add_column("释义", max_width=30)
+        table.add_column("正确", justify="right", style="green")
+        table.add_column("错误", justify="right", style="red")
+        table.add_column("正确率", justify="right", width=7)
+        for idx, r in enumerate(accuracy_rows, 1):
+            cc = r["correct_count"]
+            wc = r["wrong_count"]
+            pct = f"{r['accuracy'] * 100:.0f}%"
+            color = "red" if r["accuracy"] < 0.5 else ("yellow" if r["accuracy"] < 0.8 else "green")
+            meaning = (r["meaning"] or "（无释义）").replace("\n", " ")
+            table.add_row(
+                str(idx),
+                r["word"],
+                meaning[:30],
+                f"[green]{cc}[/green]",
+                f"[red]{wc}[/red]",
+                f"[{color}]{pct}[/{color}]",
+            )
+        console.print(table)
+
+    # ========================= 6. 到期单词列表 =========================
+    if overdue_rows["cnt"] > 0:
+        console.print()
+        console.rule("[bold]到期待复习的单词")
+        max_show = 20
+        review_words = conn.execute(
+            """SELECT w.word, w.meaning, lr.stage, lr.next_review_date
+               FROM learning_records lr
+               JOIN words w ON lr.word_id = w.id
+               WHERE lr.next_review_date <= ?
+               ORDER BY lr.stage ASC, lr.next_review_date ASC
+               LIMIT ?""",
+            (today_str, max_show),
+        ).fetchall()
+
+        if len(review_words) > max_show:
+            console.print(f"  共 {overdue_rows['cnt']} 个到期，仅显示前 {max_show} 个：\n")
+        for r in review_words:
+            stage_label = stage_labels[r["stage"]] if r["stage"] < len(stage_labels) else f"阶段 {r['stage']}"
+            meaning = (r["meaning"] or "")[:25]
+            console.print(f"  [bold]{r['word']}[/bold]  {stage_label}  [{meaning}]")
+
+    # ========================= 7. 艾宾浩斯方法介绍 =========================
+    console.print()
+    _print_srs_intro(console)
