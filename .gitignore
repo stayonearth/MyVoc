@@ -23,3 +23,6 @@ Thumbs.db
 
 # MyVoc data
 *.db
+
+# Local Claude settings (machine-specific, never shared)
+.claude/
