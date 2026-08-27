@@ -16,8 +16,13 @@ import os
 import platform
 import threading
 import urllib.request
+import warnings
 
 logger = logging.getLogger(__name__)
+
+# 禁用 pygame 的欢迎信息和警告
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="pygame")
 
 # 临时音频缓存目录（用户数据目录下）
 _AUDIO_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".myvoc", "audio_cache")
