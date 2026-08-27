@@ -18,11 +18,17 @@ import threading
 import urllib.request
 import warnings
 
-logger = logging.getLogger(__name__)
-
-# 禁用 pygame 的欢迎信息和警告
+# 禁用 pygame 的欢迎信息
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
-warnings.filterwarnings("ignore", category=DeprecationWarning, module="pygame")
+
+# 过滤 pygame 内部的 pkg_resources 弃用警告（pygame 2.6.1 已知问题）
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API",
+    category=UserWarning
+)
+
+logger = logging.getLogger(__name__)
 
 # 临时音频缓存目录（用户数据目录下）
 _AUDIO_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".myvoc", "audio_cache")
