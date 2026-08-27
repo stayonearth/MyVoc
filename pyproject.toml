@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-audio = ["playsound>=1.2.2"]
+audio = ["pygame>=2.0.0"]
 
 [project.scripts]
 myvoc = "myvoc.cli:cli"

@@ -1,6 +1,6 @@
 """音频播放模块 — 为 learn 命令提供单词发音功能
 
-使用 playsound 播放 Youdao TTS 生成的 MP3 音频。
+使用 pygame 播放 Youdao TTS 生成的 MP3 音频。
 音频先下载到本地缓存，避免重复下载。
 
 支持两种播放模式：
@@ -80,33 +80,47 @@ def play_audio(audio_url: str, auto_mode: bool = False) -> None:
         return
 
     try:
-        from playsound import playsound
+        import pygame
     except ImportError:
-        logger.warning("playsound 未安装，音频播放已禁用")
+        logger.warning("pygame 未安装，音频播放已禁用")
         return
 
     filepath = _download_audio(audio_url)
     if not filepath:
         return
 
-    system = platform.system()
+    # 初始化 pygame.mixer（如果尚未初始化）
+    if not pygame.mixer.get_init():
+        try:
+            pygame.mixer.init()
+        except Exception as exc:
+            logger.debug("pygame.mixer 初始化失败: %s", exc)
+            return
 
-    if system == "Windows" and not auto_mode:
+    if not auto_mode:
         # 手动模式：阻塞播放
         try:
-            playsound(filepath)
+            pygame.mixer.music.load(filepath)
+            pygame.mixer.music.play()
+            # 等待播放完成
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)  # 每秒检查10次
         except Exception as exc:
             logger.debug("音频播放失败 [%s]: %s", filepath, exc)
     else:
-        # 自动模式 或 非 Windows：后台线程
+        # 自动模式：后台线程播放
         def _play() -> None:
             try:
-                playsound(filepath)
+                pygame.mixer.music.load(filepath)
+                pygame.mixer.music.play()
+                # 等待播放完成，最多 5 秒
+                timeout = 5.0
+                elapsed = 0.0
+                while pygame.mixer.music.get_busy() and elapsed < timeout:
+                    pygame.time.Clock().tick(10)
+                    elapsed += 0.1
             except Exception as exc:
                 logger.debug("音频播放失败 [%s]: %s", filepath, exc)
 
         thread = threading.Thread(target=_play, daemon=True)
         thread.start()
-
-        if auto_mode:
-            thread.join(timeout=5.0)
