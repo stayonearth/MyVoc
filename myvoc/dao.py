@@ -255,7 +255,44 @@ def get_today_session() -> DailySession | None:
         return None
     d = dict(row)
     d["word_ids"] = json.loads(d["word_ids"] or "[]")
+    d["test_progress"] = json.loads(d.get("test_progress") or "[]")
     return DailySession(**d)
+
+
+def save_test_progress(word_ids: list[int], daily_test_count: int | None = None) -> None:
+    """将已测试的单词 ID 保存到今天的 daily_session，用于崩溃恢复和每日上限追踪。
+
+    如果今天尚无会话行则新建一条（仅用于记录测试进度，total_words 为 0）。
+    在 test_progress JSON 数组中额外存入 "_daily_test_count:N" 标记，
+    用于跨调用统计当日已测试的单词总数。
+
+    参数:
+        word_ids: 已测试的单词 ID 列表
+        daily_test_count: 可选，手动指定当日总测试数（不传则自动计算 len(word_ids)）
+    """
+    conn = _conn()
+    today = date.today().isoformat()
+    count = daily_test_count if daily_test_count is not None else len(word_ids)
+    # 将每日计数标记追加到数组末尾，格式: "_daily_test_count:N"
+    progress = list(word_ids)
+    progress.append(f"_daily_test_count:{count}")
+
+    cur = conn.execute(
+        "SELECT id FROM daily_sessions WHERE session_date = ?", (today,)
+    ).fetchone()
+    if cur:
+        conn.execute(
+            "UPDATE daily_sessions SET test_progress = ? WHERE session_date = ?",
+            (json.dumps(progress), today),
+        )
+    else:
+        # 无今日会话：新建一条，只用于保存测试进度
+        conn.execute(
+            "INSERT INTO daily_sessions (session_date, word_ids, total_words, test_progress) "
+            "VALUES (?, ?, ?, ?)",
+            (today, json.dumps([]), 0, json.dumps(progress)),
+        )
+    conn.commit()
 
 
 def get_today_word_ids() -> list[int]:
@@ -278,13 +315,16 @@ def get_latest_record(word_id: int, learn_date: date | None = None) -> dict | No
     return dict(row) if row else None
 
 
-def get_test_queue() -> list[Word]:
+def get_test_queue(max_size: int | None = None) -> list[Word]:
     """生成今日考核队列
 
     队列组成：
     1. 新词：今日会话中但没有任何学习记录的词
     2. 到期复习：next_review_date <= 今天（从 learning_records 全局筛选）
     合并去重，每个单词只出现一次（要么在新词，要么在复习中）
+
+    参数:
+        max_size: 如果指定，返回前 N 个单词；否则过滤已测试词（test_progress）后全部返回。
     """
     today = date.today().isoformat()
     conn = _conn()
@@ -303,11 +343,13 @@ def get_test_queue() -> list[Word]:
         reviewed_set = {r["word_id"] for r in reviewed_ids}
         new_word_ids = [wid for wid in new_word_ids if wid not in reviewed_set]
 
-    # 3. 到期复习单词（全局筛选，不限会话）
+    # 3. 到期复习单词（全局筛选，不限会话，按到期日升序）
     overdue_rows = conn.execute(
-        """SELECT DISTINCT word_id
+        """SELECT word_id, MIN(next_review_date) AS min_date
            FROM learning_records
-           WHERE next_review_date <= ?""",
+           WHERE next_review_date <= ?
+           GROUP BY word_id
+           ORDER BY min_date ASC, word_id ASC""",
         (today,),
     ).fetchall()
     review_word_ids = [r["word_id"] for r in overdue_rows]
@@ -320,6 +362,17 @@ def get_test_queue() -> list[Word]:
 
     if not all_ids:
         return []
+
+    # 5. 限制数量
+    if max_size is not None:
+        all_ids = all_ids[:max_size]
+    else:
+        # 过滤已测试的词（崩溃恢复）
+        session = get_today_session()
+        if session and session.test_progress:
+            all_ids = [wid for wid in all_ids if wid not in session.test_progress]
+            if not all_ids:
+                return []
 
     words = get_words_by_ids(all_ids)
     # 按 ID 顺序保持队列顺序

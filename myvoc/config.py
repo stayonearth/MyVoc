@@ -24,6 +24,7 @@ _DEFAULTS = {
     "testing": {
         "case_sensitive": False,
         "typo_tolerance": 0,  # MVP 精确匹配
+        "session_limit": 150,  # 每日测试上限（单词数），跨 test 调用累计
     },
     "ebbinghaus": {
         "base_intervals": [0, 1, 2, 4, 7, 15, 30],

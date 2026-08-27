@@ -42,3 +42,4 @@ class DailySession:
     session_date: Optional[date] = None
     word_ids: list[int] | None = None  # JSON 数组
     total_words: int = 0
+    test_progress: list[int] | None = None  # JSON 数组，记录已测试的单词 ID

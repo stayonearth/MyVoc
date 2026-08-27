@@ -28,6 +28,14 @@ def init_db(db_path: Path | None = None) -> sqlite3.Connection:
     _create_tables(conn)
     # executescript() 会隐式 commit，之后需要再 commit 一次恢复状态
     conn.commit()
+
+    # 表结构迁移：检查是否需要添加新列
+    cur = conn.execute("PRAGMA table_info(daily_sessions)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "test_progress" not in columns:
+        conn.execute("ALTER TABLE daily_sessions ADD COLUMN test_progress TEXT DEFAULT '[]'")
+        conn.commit()
+
     return conn
 
 
@@ -62,6 +70,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             session_date DATE    UNIQUE NOT NULL,
             word_ids     TEXT    DEFAULT '[]',
-            total_words  INTEGER DEFAULT 0
+            total_words  INTEGER DEFAULT 0,
+            test_progress TEXT   DEFAULT '[]'
         );
     """)

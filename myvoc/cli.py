@@ -236,13 +236,43 @@ def test(count: int | None) -> None:
     答对 -> stage+1，更新复习间隔
     答错 -> stage-2，难度系数降低
     """
-    from myvoc.dao import get_test_queue, update_record
+    import time
+
+    from myvoc.config import get as conf_get
+    from myvoc.dao import get_test_queue, get_today_session, save_test_progress, update_record
     from myvoc.audio import play_audio
 
     queue = get_test_queue()
     if not queue:
-        click.echo("今日没有待考核的单词，请先运行 `myvoc add` 录入单词。")
+        click.echo("今日考核已完成。")
         return
+
+    # 检查每日测试上限（跨调用的累计数）
+    daily_limit = conf_get("testing.session_limit", 150)
+    if daily_limit:
+        today_progress = get_today_session()
+        daily_tested = 0
+        if today_progress and today_progress.test_progress:
+            for item in today_progress.test_progress:
+                if isinstance(item, str) and item.startswith("_daily_test_count:"):
+                    try:
+                        daily_tested = int(item.split(":", 1)[1])
+                    except (ValueError, IndexError):
+                        pass
+                    break
+        remaining = daily_limit - daily_tested
+        if remaining <= 0:
+            click.echo("今日考核已完成。")
+            return
+        queue = queue[:remaining]
+
+    if not queue:
+        click.echo("今日考核已完成。")
+        return
+
+    # 应用每调用上限（如果显式指定了 --count）
+    if count:
+        queue = queue[:count]
 
     correct_count = 0
     wrong_count = 0
@@ -250,6 +280,12 @@ def test(count: int | None) -> None:
 
     # 答错的单词收集起来，一轮结束后重测一次
     wrong_words = []
+    # 已实际回答的单词 ID（用于崩溃恢复）
+    answered_ids = []
+
+    # 保存队列进度（崩溃恢复用）
+    queue_ids = [w.id for w in queue]
+    save_test_progress(queue_ids)
 
     click.echo("== 考核模式 ==")
     click.echo(f"共 {total} 个单词\n")
@@ -267,17 +303,20 @@ def test(count: int | None) -> None:
 
         if answer.lower() == 'q':
             click.echo(f"\n已退出考核模式。（答了 {idx - 1}/{total} 题）")
+            save_test_progress(answered_ids)
             return
 
         if answer.lower() == word.word.lower():
             update_record(word.id, is_correct=True)
             correct_count += 1
+            answered_ids.append(word.id)
             click.echo(f"\n  [正确] {word.word}")
             if word.phonetic:
                 click.echo(f"  {word.phonetic}")
         else:
             update_record(word.id, is_correct=False)
             wrong_count += 1
+            answered_ids.append(word.id)
             click.echo(f"\n  [错误] 正确答案：{word.word}")
             if word.phonetic:
                 click.echo(f"  {word.phonetic}")
@@ -286,6 +325,8 @@ def test(count: int | None) -> None:
             if word.meaning:
                 click.echo(f"  释义：{word.meaning}")
             wrong_words.append(word)
+
+            time.sleep(1.5)  # 给时间阅读正确答案
 
         click.echo("-" * 50)
         idx += 1
@@ -304,15 +345,18 @@ def test(count: int | None) -> None:
 
             if answer.lower() == 'q':
                 click.echo(f"\n已退出重测。")
+                save_test_progress(answered_ids)
                 break
 
             if answer.lower() == word.word.lower():
                 update_record(word.id, is_correct=True)
+                answered_ids.append(word.id)
                 click.echo(f"\n  [正确] {word.word}")
                 if word.phonetic:
                     click.echo(f"  {word.phonetic}")
             else:
                 update_record(word.id, is_correct=False)
+                answered_ids.append(word.id)
                 click.echo(f"\n  [错误] 正确答案：{word.word}")
                 if word.phonetic:
                     click.echo(f"  {word.phonetic}")
@@ -320,7 +364,12 @@ def test(count: int | None) -> None:
                     play_audio(word.audio_url)
                 if word.meaning:
                     click.echo(f"  释义：{word.meaning}")
+                time.sleep(1.5)  # 给时间阅读正确答案
             click.echo("-" * 50)
+
+    # 保存最终进度（已实际回答的词）并更新每日测试计数
+    daily_tested_today = daily_tested + len(answered_ids)
+    save_test_progress(answered_ids, daily_test_count=daily_tested_today)
 
     # 统计
     click.echo()
@@ -667,3 +716,74 @@ def status() -> None:
     # ========================= 7. 艾宾浩斯方法介绍 =========================
     console.print()
     _print_srs_intro(console)
+
+
+# ---------------------------------------------------------------------------
+# 数据库备份 / 恢复
+# ---------------------------------------------------------------------------
+
+
+@cli.command("backup-db")
+@click.option("--out", "output_path", type=click.Path(), default=None,
+              help="指定输出文件路径 (默认: db/backup_YYYY-MM-DD.sql)")
+def backup_db(output_path: str | None) -> None:
+    """将整个单词库备份为 SQL 脚本
+
+    默认备份到 db/backup_YYYY-MM-DD.sql。
+    使用 myvoc restore-db 可以从此备份恢复。
+    """
+    from myvoc.database import init_db
+    from pathlib import Path
+
+    if output_path:
+        # 自定义输出路径
+        conn = init_db()
+        p = Path(output_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with p.open("w", encoding="utf-8") as f:
+                for line in conn.iterdump():
+                    f.write(line + "\n")
+        except Exception as exc:
+            click.echo(f"[FAIL] 备份失败: {exc}")
+            conn.close()
+            return
+
+        # 统计
+        word_count = conn.execute("SELECT COUNT(*) FROM words").fetchone()[0]
+        record_count = conn.execute("SELECT COUNT(*) FROM learning_records").fetchone()[0]
+        session_count = conn.execute("SELECT COUNT(*) FROM daily_sessions").fetchone()[0]
+        conn.close()
+
+        click.echo(f"[OK] 数据库已备份: {p}")
+        click.echo(f"     单词 {word_count} 个, 学习记录 {record_count} 条, 会话 {session_count} 次")
+    else:
+        from myvoc.backup import backup_db as _backup
+        _backup()
+
+
+@cli.command("restore-db")
+@click.option("--force", is_flag=True, help="跳过确认直接恢复")
+@click.option("--file", "restore_file", type=click.Path(), default=None,
+              help="指定备份文件路径（与 --select 互斥）")
+@click.option("--select", "select_idx", type=int, default=None,
+              help="指定恢复的备份序号（1-based），配合 --force 可完全非交互式恢复")
+def restore_db(force: bool, restore_file: str | None, select_idx: int | None) -> None:
+    """从 SQL 备份文件恢复数据库
+
+    列出 db/ 目录下的所有备份文件，选择后恢复。
+    恢复会覆盖当前数据库，请谨慎操作。
+
+    配合 --select 和 --force 可完全非交互式恢复:
+      myvoc restore-db --select 1 --force
+
+    使用 --file 指定任意备份文件路径直接恢复:
+      myvoc restore-db --file /path/to/backup.sql --force
+    """
+    from myvoc.backup import restore_db as _restore
+
+    if restore_file and select_idx is not None:
+        click.echo("[ERROR] --file 和 --select 只能指定一个")
+        return
+
+    _restore(force=force, select_idx=select_idx, restore_file=restore_file)
