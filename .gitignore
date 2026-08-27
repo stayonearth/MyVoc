@@ -26,3 +26,4 @@ Thumbs.db
 
 # Local Claude settings (machine-specific, never shared)
 .claude/
+CLAUDE.md
