@@ -428,18 +428,32 @@ def delete(words):
 
 @cli.command()
 @click.option("--count", type=int, default=None, help="只补全前 N 个单词")
-def addaudio(count: int | None) -> None:
+@click.option("-f", "--force", is_flag=True, help="强制处理所有单词（默认只处理今天新添加的）")
+def addaudio(count: int | None, force: bool) -> None:
     """补全单词的音频 URL 及音标
 
+    默认只补全今天新添加的单词，使用 -f 参数强制处理所有单词。
+
     用法:
-      myvoc addaudio               # 补全所有单词
-      myvoc addaudio --count 10    # 只补全前 10 个
+      myvoc addaudio               # 只补全今天的新词
+      myvoc addaudio -f            # 补全所有单词
+      myvoc addaudio --count 10    # 只补全前 10 个（从今天新词开始）
+      myvoc addaudio -f --count 10 # 强制模式下只补全前 10 个
     """
     from myvoc.dao import get_all_words, update_audio_url, update_word_phonetic
     from myvoc.dictionary import fetch_audio_url
+    from datetime import date
     import time
 
     words = get_all_words()
+
+    # 如果不是强制模式，只处理今天新添加的单词
+    if not force:
+        today = date.today().isoformat()
+        words = [w for w in words if w.created_at and w.created_at.startswith(today)]
+        if not words:
+            click.echo("今天没有新添加的单词，使用 -f 参数处理所有单词")
+            return
 
     if count:
         words = words[:count]
@@ -449,7 +463,8 @@ def addaudio(count: int | None) -> None:
     skip_count = 0
     fail_count = 0
 
-    click.echo("== 音频补全模式 ==")
+    mode_label = "全部单词" if force else "今天新词"
+    click.echo(f"== 音频补全模式 ({mode_label}) ==")
     click.echo()
 
     for idx, word in enumerate(words, 1):
