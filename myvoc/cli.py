@@ -235,6 +235,7 @@ def test(count: int | None) -> None:
 
     答对 -> stage+1，更新复习间隔
     答错 -> stage-2，难度系数降低
+    持续循环直到所有单词都答对才退出（可随时按 'q' 退出）
     """
     import time
 
@@ -274,12 +275,10 @@ def test(count: int | None) -> None:
     if count:
         queue = queue[:count]
 
-    correct_count = 0
-    wrong_count = 0
     total = len(queue)
+    total_correct_count = 0
+    total_wrong_count = 0
 
-    # 答错的单词收集起来，一轮结束后重测一次
-    wrong_words = []
     # 已实际回答的单词 ID（用于崩溃恢复）
     answered_ids = []
 
@@ -288,74 +287,49 @@ def test(count: int | None) -> None:
     save_test_progress(queue_ids)
 
     click.echo("== 考核模式 ==")
-    click.echo(f"共 {total} 个单词\n")
+    click.echo(f"共 {total} 个单词")
+    click.echo("提示：持续循环直到所有单词都答对才结束（可随时按 'q' 退出）\n")
 
-    # 主循环：正常队列
-    idx = 1
+    # 持续循环直到所有单词都答对
+    round_num = 1
     while queue:
-        word = queue.pop(0)
+        click.echo(f"\n{'='*50}")
+        click.echo(f"第 {round_num} 轮：剩余 {len(queue)} 个单词")
+        click.echo('='*50)
 
-        click.clear()
-        click.echo(f"== 考核模式 · 第 {idx} / {total} 题 ==")
-        click.echo("-" * 50)
-        click.echo(f"\n  释义：{word.meaning if word.meaning else '（无释义）'}")
-        answer = click.prompt("\n  请输入英文", default="", show_default=False).strip()
+        wrong_words = []
 
-        if answer.lower() == 'q':
-            click.echo(f"\n已退出考核模式。（答了 {idx - 1}/{total} 题）")
-            save_test_progress(answered_ids)
-            return
-
-        if answer.lower() == word.word.lower():
-            update_record(word.id, is_correct=True)
-            correct_count += 1
-            answered_ids.append(word.id)
-            click.echo(f"\n  [正确] {word.word}")
-            if word.phonetic:
-                click.echo(f"  {word.phonetic}")
-        else:
-            update_record(word.id, is_correct=False)
-            wrong_count += 1
-            answered_ids.append(word.id)
-            click.echo(f"\n  [错误] 正确答案：{word.word}")
-            if word.phonetic:
-                click.echo(f"  {word.phonetic}")
-            if word.audio_url:
-                play_audio(word.audio_url)
-            if word.meaning:
-                click.echo(f"  释义：{word.meaning}")
-            wrong_words.append(word)
-
-            time.sleep(1.5)  # 给时间阅读正确答案
-
-        click.echo("-" * 50)
-        idx += 1
-
-    # 重测一轮答错的单词
-    if wrong_words:
-        click.echo(f"\n有 {len(wrong_words)} 个单词答错了，开始重测：")
-        click.echo("=" * 50)
-
-        for idx2, word in enumerate(wrong_words, 1):
+        # 当前轮次的测试
+        for idx, word in enumerate(queue, 1):
             click.clear()
-            click.echo(f"== 重测 · 第 {idx2} / {len(wrong_words)} 题 ==")
+            click.echo(f"== 考核模式 · 第 {round_num} 轮 · 第 {idx} / {len(queue)} 题 ==")
             click.echo("-" * 50)
             click.echo(f"\n  释义：{word.meaning if word.meaning else '（无释义）'}")
-            answer = click.prompt("\n  请输入英文", default="", show_default=False).strip()
+            answer = click.prompt("\n  请输入英文（或 'q' 退出）", default="", show_default=False).strip()
 
             if answer.lower() == 'q':
-                click.echo(f"\n已退出重测。")
+                click.echo(f"\n已退出考核模式。")
                 save_test_progress(answered_ids)
-                break
+                # 显示统计
+                if total_correct_count + total_wrong_count > 0:
+                    click.echo()
+                    click.echo("=" * 50)
+                    total_answered = total_correct_count + total_wrong_count
+                    accuracy = f"{total_correct_count*100//total_answered}%" if total_answered else "N/A"
+                    click.echo(f"本次统计：共答题 {total_answered} 次，正确 {total_correct_count}，错误 {total_wrong_count}，正确率 {accuracy}")
+                    click.echo("=" * 50)
+                return
 
             if answer.lower() == word.word.lower():
                 update_record(word.id, is_correct=True)
+                total_correct_count += 1
                 answered_ids.append(word.id)
                 click.echo(f"\n  [正确] {word.word}")
                 if word.phonetic:
                     click.echo(f"  {word.phonetic}")
             else:
                 update_record(word.id, is_correct=False)
+                total_wrong_count += 1
                 answered_ids.append(word.id)
                 click.echo(f"\n  [错误] 正确答案：{word.word}")
                 if word.phonetic:
@@ -364,9 +338,17 @@ def test(count: int | None) -> None:
                     play_audio(word.audio_url)
                 if word.meaning:
                     click.echo(f"  释义：{word.meaning}")
+                wrong_words.append(word)
+
                 time.sleep(1.5)  # 给时间阅读正确答案
+
             click.echo("-" * 50)
 
+        # 更新队列：只保留答错的单词进入下一轮
+        queue = wrong_words
+        round_num += 1
+
+    # 所有单词都答对了
     # 保存最终进度（已实际回答的词）并更新每日测试计数
     daily_tested_today = daily_tested + len(answered_ids)
     save_test_progress(answered_ids, daily_test_count=daily_tested_today)
@@ -374,9 +356,11 @@ def test(count: int | None) -> None:
     # 统计
     click.echo()
     click.echo("=" * 50)
-    total_answered = correct_count + wrong_count
-    accuracy = f"{correct_count*100//total_answered}%" if total_answered else "N/A"
-    click.echo(f"考核完成：共 {total_answered} 题，正确 {correct_count}，错误 {wrong_count}，正确率 {accuracy}")
+    click.echo("🎉 恭喜！所有单词都答对了！")
+    total_answered = total_correct_count + total_wrong_count
+    accuracy = f"{total_correct_count*100//total_answered}%" if total_answered else "N/A"
+    click.echo(f"本次统计：共答题 {total_answered} 次，正确 {total_correct_count}，错误 {total_wrong_count}，正确率 {accuracy}")
+    click.echo(f"完成轮次：{round_num - 1} 轮")
     click.echo("=" * 50)
 
 
