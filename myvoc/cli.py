@@ -614,19 +614,19 @@ def status() -> None:
     console.print(f"  到期需复习：[bold]{overdue_rows['cnt']}[/bold] 个")
     console.print(f"  新词待学：  [bold]{new_count}[/bold] 个\n")
 
-    # ========================= 4. 常错词 =========================
-    console.rule("[bold]常错词 TOP 10（错误次数最多）[/bold]")
+    # ========================= 4. 最常错的词 =========================
+    console.rule("[bold]最常错的词 TOP 30（累计错误次数最多）[/bold]")
 
-    wrong_rows = conn.execute(
+    top_wrong_rows = conn.execute(
         """SELECT w.word, w.meaning, lr.wrong_count, lr.correct_count
            FROM learning_records lr
            JOIN words w ON lr.word_id = w.id
            WHERE lr.wrong_count > 0
            ORDER BY lr.wrong_count DESC
-           LIMIT 10"""
+           LIMIT 30"""
     ).fetchall()
 
-    if not wrong_rows:
+    if not top_wrong_rows:
         console.print("  [dim]暂无数据，先学习一些单词吧![/dim]\n")
     else:
         table = Table(show_header=True, header_style="bold", box=None)
@@ -635,7 +635,7 @@ def status() -> None:
         table.add_column("释义", max_width=35)
         table.add_column("错误", justify="right", style="red")
         table.add_column("正确", justify="right", style="green")
-        for idx, r in enumerate(wrong_rows, 1):
+        for idx, r in enumerate(top_wrong_rows, 1):
             wc = r["wrong_count"]
             cc = r["correct_count"]
             ratio = f"{cc * 100 // (cc + wc)}%" if (cc + wc) > 0 else "—"
@@ -649,44 +649,51 @@ def status() -> None:
             )
         console.print(table)
 
-    # ========================= 5. 易错词 =========================
+    # ========================= 5. 最新错的词 =========================
     console.print()
-    console.rule("[bold]易错词 TOP 20（正确率最低，至少 2 条记录）[/bold]")
+    console.rule("[bold]最新错的词 TOP 30（最近答错过）[/bold]")
 
-    accuracy_rows = conn.execute(
-        """SELECT w.word, w.meaning, lr.correct_count, lr.wrong_count,
-                  CAST(lr.correct_count AS REAL) / (lr.correct_count + lr.wrong_count) AS accuracy
+    recent_wrong_rows = conn.execute(
+        """SELECT w.word, w.meaning, lr.wrong_count, lr.correct_count,
+                  lr.last_result, lr.last_review_at
            FROM learning_records lr
            JOIN words w ON lr.word_id = w.id
-           GROUP BY w.id
-           HAVING lr.correct_count + lr.wrong_count >= 2
-           ORDER BY accuracy ASC
-           LIMIT 20"""
+           WHERE lr.last_result = 'wrong'
+           ORDER BY lr.last_review_at DESC
+           LIMIT 30"""
     ).fetchall()
 
-    if not accuracy_rows:
+    if not recent_wrong_rows:
         console.print("  [dim]暂无数据，多练习几轮再来看![/dim]\n")
     else:
         table = Table(show_header=True, header_style="bold", box=None)
         table.add_column("#", style="dim", width=4)
         table.add_column("单词", style="bold", max_width=15)
         table.add_column("释义", max_width=30)
-        table.add_column("正确", justify="right", style="green")
-        table.add_column("错误", justify="right", style="red")
+        table.add_column("累计错", justify="right", style="red")
+        table.add_column("累计对", justify="right", style="green")
         table.add_column("正确率", justify="right", width=7)
-        for idx, r in enumerate(accuracy_rows, 1):
+        table.add_column("最近错", justify="right", max_width=12)
+        for idx, r in enumerate(recent_wrong_rows, 1):
             cc = r["correct_count"]
             wc = r["wrong_count"]
-            pct = f"{r['accuracy'] * 100:.0f}%"
-            color = "red" if r["accuracy"] < 0.5 else ("yellow" if r["accuracy"] < 0.8 else "green")
+            pct = f"{cc * 100 // (cc + wc)}%" if (cc + wc) > 0 else "—"
+            color = "red" if (cc + wc) > 0 and cc / (cc + wc) < 0.5 else ("yellow" if (cc + wc) > 0 and cc / (cc + wc) < 0.8 else "green")
             meaning = (r["meaning"] or "（无释义）").replace("\n", " ")
+            last_at = r["last_review_at"]
+            if last_at:
+                # 只显示日期部分，截取前10字符（YYYY-MM-DD HH:MM:SS -> YYYY-MM-DD）
+                last_at_display = last_at[:10]
+            else:
+                last_at_display = "—"
             table.add_row(
                 str(idx),
                 r["word"],
                 meaning[:30],
-                f"[green]{cc}[/green]",
                 f"[red]{wc}[/red]",
+                f"[green]{cc}[/green]",
                 f"[{color}]{pct}[/{color}]",
+                last_at_display,
             )
         console.print(table)
 
