@@ -282,10 +282,6 @@ def test(count: int | None) -> None:
     # 已实际回答的单词 ID（用于崩溃恢复）
     answered_ids = []
 
-    # 保存队列进度（崩溃恢复用）
-    queue_ids = [w.id for w in queue]
-    save_test_progress(queue_ids)
-
     click.echo("== 考核模式 ==")
     click.echo(f"共 {total} 个单词")
     click.echo("提示：持续循环直到所有单词都答对才结束（可随时按 'q' 退出）\n")

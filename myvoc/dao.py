@@ -370,7 +370,9 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
         # 过滤已测试的词（崩溃恢复）
         session = get_today_session()
         if session and session.test_progress:
-            all_ids = [wid for wid in all_ids if wid not in session.test_progress]
+            # 只提取数字 ID，忽略字符串标记（如 "_daily_test_count:N"）
+            tested_ids = [item for item in session.test_progress if isinstance(item, int)]
+            all_ids = [wid for wid in all_ids if wid not in tested_ids]
             if not all_ids:
                 return []
 
