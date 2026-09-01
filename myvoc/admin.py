@@ -1,6 +1,6 @@
 """MyVoc 数据管理页面 — Streamlit 工具
 
-只读查看单词及对应的学习记录，不修改任何现有数据或代码。
+查看单词及对应的学习记录，支持删除单词（级联删除学习记录）。
 
 运行方式:
     pip install streamlit
@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
@@ -196,11 +197,35 @@ def main() -> None:
             expanded=False,
         ):
             # 单词信息行
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+            c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
             c1.markdown(f"**{word.get('word', '?')}**")
             c2.caption(word.get("phonetic", "") or "—")
             c3.caption(word.get("meaning", "") or "（无释义）")
             c4.caption(f"录入: {word.get('created_at', '?')}")
+
+            # 删除按钮 / 确认删除
+            if st.session_state.get("pending_delete") == wid:
+                pw = st.session_state.get("pending_word", "?")
+                st.warning(f"确定删除 **{pw}** 及其所有学习记录？")
+                _ck, _ok, _cn = st.columns([2, 1, 1])
+                if _ok.button("确认删除", key=f"confirm_{wid}", use_container_width=True):
+                    _delete_word(wid)
+                    st.success(f"已删除 **{pw}**")
+                    del st.session_state["pending_delete"]
+                    del st.session_state["pending_word"]
+                    st.rerun()
+                if _cn.button("取消", key=f"cancel_{wid}", use_container_width=True):
+                    del st.session_state["pending_delete"]
+                    del st.session_state["pending_word"]
+                    st.rerun()
+                st.stop()
+            else:
+                st.button(
+                    "🗑️ Del",
+                    key=f"del_{wid}",
+                    help=f"删除单词 '{word.get('word', '?')}' 及其所有学习记录",
+                    use_container_width=True,
+                )
 
             st.divider()
 
@@ -258,6 +283,28 @@ def _word_max_stage(word_id: int, records_by_word: dict) -> int:
     """返回单词最高阶段"""
     records = records_by_word.get(word_id, [])
     return max((r["stage"] for r in records), default=0)
+
+
+def _delete_word(word_id: int) -> None:
+    """级联删除单词及其所有学习记录（与 cli.py delete 逻辑一致）"""
+    conn = sqlite3.connect(str(DB_PATH))
+    try:
+        # 先删除从表数据（避免外键约束失败）
+        conn.execute("DELETE FROM learning_records WHERE word_id = ?", (word_id,))
+        # 从 daily_sessions.word_ids 中移除
+        rows = conn.execute("SELECT id, word_ids FROM daily_sessions").fetchall()
+        for row in rows:
+            ids = json.loads(row["word_ids"] or "[]")
+            if word_id in ids:
+                ids.remove(word_id)
+                conn.execute(
+                    "UPDATE daily_sessions SET word_ids = ? WHERE id = ?",
+                    (json.dumps(ids), row["id"]),
+                )
+        conn.execute("DELETE FROM words WHERE id = ?", (word_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
