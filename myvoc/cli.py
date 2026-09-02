@@ -22,12 +22,14 @@ def cli():
 @cli.command()
 @click.option("--skip-unknown", is_flag=True, help="跳过查不到释义的单词")
 def add(skip_unknown: bool) -> None:
-    """录入单词：逐行输入英文单词，自动查词后入库
+    """录入单词：逐行输入英文单词或词组，自动查词后入库
 
-    每行可以输入多个单词（空格分隔），回车后逐个查词显示。
+    每行可以输入多个单词（空格分隔）或词组（用引号包裹），回车后逐个查词显示。
+    词组示例: "take off" 或 'put up with'
     按 Ctrl+D (Unix) / Ctrl+Z (Windows) 结束输入。
     """
     import sys
+    import shlex
     from myvoc.dictionary import lookup_word
     from myvoc.dao import upsert_word, create_session
     from rich.console import Console
@@ -35,6 +37,7 @@ def add(skip_unknown: bool) -> None:
 
     console = Console()
     console.print("[录入模式] 输入完成后按 [cyan]Ctrl+Z[/cyan] (Windows) 或 [cyan]Ctrl+D[/cyan] (Unix) 结束")
+    console.print("[dim]提示：词组请用引号包裹，如 \"take off\" 或 'put up with'[/dim]")
     console.print("-" * 50)
 
     added = []
@@ -53,7 +56,14 @@ def add(skip_unknown: bool) -> None:
         if not words_text:
             continue
 
-        for raw_word in words_text.split():
+        # 使用 shlex.split() 智能分割：保留引号内的词组，去除引号本身
+        try:
+            raw_words = shlex.split(words_text)
+        except ValueError as e:
+            console.print(f"  [yellow][ERROR][reset] 输入格式错误: {e}")
+            continue
+
+        for raw_word in raw_words:
             word = raw_word.strip().lower()
             if not word:
                 continue
@@ -229,18 +239,26 @@ def learn(auto: bool, count: int | None) -> None:
 
 
 @cli.command()
-@click.option("--count", type=int, default=None, help="只考核前 N 个单词")
-def test(count: int | None) -> None:
+@click.argument("limit", type=int, required=False, default=None)
+def test(limit: int | None) -> None:
     """考核模式：显示中文释义，输入英文单词作答
 
     答对 -> stage+1，更新复习间隔
     答错 -> stage-2，难度系数降低
     持续循环直到所有单词都答对才退出（可随时按 'q' 退出）
+
+    参数:
+        LIMIT: 可选，今日测试的最大单词数。不指定则使用配置中的默认值。
+               如果小于今日新增单词数，则以新增单词数为准。
+
+    示例:
+        myvoc test      # 使用配置中的默认上限（如 150）
+        myvoc test 30   # 今日最多测试 30 个单词
     """
     import time
 
     from myvoc.config import get as conf_get
-    from myvoc.dao import get_test_queue, get_today_session, save_test_progress, update_record
+    from myvoc.dao import get_test_queue, get_today_session, save_test_progress, update_record, get_words_by_ids
     from myvoc.audio import play_audio
 
     queue = get_test_queue()
@@ -249,31 +267,59 @@ def test(count: int | None) -> None:
         return
 
     # 检查每日测试上限（跨调用的累计数）
-    daily_limit = conf_get("testing.session_limit", 150)
-    if daily_limit:
-        today_progress = get_today_session()
-        daily_tested = 0
-        if today_progress and today_progress.test_progress:
-            for item in today_progress.test_progress:
-                if isinstance(item, str) and item.startswith("_daily_test_count:"):
-                    try:
-                        daily_tested = int(item.split(":", 1)[1])
-                    except (ValueError, IndexError):
-                        pass
-                    break
-        remaining = daily_limit - daily_tested
-        if remaining <= 0:
-            click.echo("今日考核已完成。")
+    # 如果命令行指定了 limit，则使用命令行参数；否则使用配置
+    daily_limit = limit if limit is not None else conf_get("testing.session_limit", 150)
+
+    # 计算今日新增单词数（未答过的）
+    today_word_ids = get_today_session().word_ids if get_today_session() else []
+    today_progress = get_today_session()
+    daily_tested = 0
+    tested_ids_set = set()
+
+    if today_progress and today_progress.test_progress:
+        for item in today_progress.test_progress:
+            if isinstance(item, str) and item.startswith("_daily_test_count:"):
+                try:
+                    daily_tested = int(item.split(":", 1)[1])
+                except (ValueError, IndexError):
+                    pass
+                break
+        tested_ids_set = {item for item in today_progress.test_progress if isinstance(item, int)}
+
+    new_unanswered = [wid for wid in today_word_ids if wid not in tested_ids_set]
+    new_unanswered_count = len(new_unanswered)
+
+    # 如果 daily_limit 小于今日新增单词数，则以新增单词数为准
+    if daily_limit and new_unanswered_count > 0:
+        original_limit = daily_limit
+        daily_limit = max(daily_limit, new_unanswered_count)
+        if limit is not None and original_limit < new_unanswered_count:
+            click.echo(f"提示：今日新增 {new_unanswered_count} 个单词，已将测试上限从 {original_limit} 调整为 {daily_limit}")
+            click.echo()
+
+    if daily_limit and daily_tested >= daily_limit:
+        # 已达到每日上限
+        # 检查是否有新的未答词（仅今日会话中但还未答过的）
+        if new_unanswered:
+            click.echo(f"已达到今日测试上限（已测试 {daily_tested} / {daily_limit} 题）。")
+            click.echo(f"但有 {len(new_unanswered)} 个新增单词尚未答过。")
+            if click.confirm("是否继续答这些新词？", default=False):
+                # 继续，但只答新词
+                new_word_objs = get_words_by_ids(new_unanswered)
+                queue = new_word_objs
+            else:
+                click.echo("已退出考核模式。")
+                return
+        else:
+            click.echo(f"已达到今日测试上限（已测试 {daily_tested} / {daily_limit} 题）。")
             return
+    elif daily_limit:
+        remaining = daily_limit - daily_tested
         queue = queue[:remaining]
 
     if not queue:
         click.echo("今日考核已完成。")
         return
-
-    # 应用每调用上限（如果显式指定了 --count）
-    if count:
-        queue = queue[:count]
 
     total = len(queue)
     total_correct_count = 0
