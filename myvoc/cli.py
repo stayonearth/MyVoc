@@ -502,6 +502,12 @@ def addaudio(count: int | None, force: bool) -> None:
             skip_count += 1
             continue
 
+        # 词组（含空格）跳过音频查询
+        if ' ' in word.word:
+            click.echo("[SKIP] 词组跳过")
+            skip_count += 1
+            continue
+
         # 查询 API
         result = fetch_audio_url(word.word)
         if result:
