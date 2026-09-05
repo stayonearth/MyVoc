@@ -347,6 +347,20 @@ def main() -> None:
         st.divider()
         st.caption(f"数据库: {DB_PATH}")
 
+    # ---- 检测筛选条件变化，重置页码 ----
+    if "_admin_last_search" not in st.session_state:
+        st.session_state._admin_last_search = search
+    if "_admin_last_stage" not in st.session_state:
+        st.session_state._admin_last_stage = min_stage
+
+    search_changed = st.session_state._admin_last_search != search
+    stage_changed = st.session_state._admin_last_stage != min_stage
+
+    if search_changed or stage_changed:
+        st.session_state._admin_page = 0
+        st.session_state._admin_last_search = search
+        st.session_state._admin_last_stage = min_stage
+
     # ---- 分页控件（显式 session_state 管理） ----
     if "_admin_page" not in st.session_state:
         st.session_state._admin_page = 0
@@ -359,8 +373,8 @@ def main() -> None:
                       index=page_sizes.index(st.session_state._admin_page_size))
     st.session_state._admin_page_size = ps
 
-    # 计算总页数
-    total_pages = max(1, (stats["words"] + ps - 1) // ps) if stats["words"] > 0 else 1
+    # 总页数（初始值，查询后根据筛选结果重算）
+    total_pages = 1
 
     # 页码输入
     page = st.number_input(
@@ -373,13 +387,16 @@ def main() -> None:
     )
     st.session_state._admin_page = page
 
-    # 筛选改变后超出范围时重置页码
-    if page * ps >= stats["words"] and stats["words"] > 0:
-        st.session_state._admin_page = total_pages - 1
-        page = total_pages - 1
+    # 超出当前筛选结果的页数范围时重置页码
+    if page >= total_pages:
+        st.session_state._admin_page = 0
+        page = 0
 
     # ---- 查询 ----
     words, total = _paginate_page(page, ps, search, min_stage, sort_by)
+
+    # 根据筛选结果重新计算总页数
+    total_pages = max(1, (total + ps - 1) // ps) if total > 0 else 1
 
     # ---- 列表 ----
     if total == 0:

@@ -29,6 +29,6 @@
     "timeout_seconds": 5
   },
   "database": {
-    "path": ""
+    "path": "db/myvoc.db"
   }
 }

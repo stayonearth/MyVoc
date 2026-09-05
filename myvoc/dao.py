@@ -319,7 +319,7 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     """生成今日考核队列
 
     队列组成：
-    1. 新词：今日会话中但没有任何学习记录的词
+    1. 新词：今日会话中但尚未在本次 test 中答过的词（test_progress 中不存在）
     2. 到期复习：next_review_date <= 今天（从 learning_records 全局筛选）
     合并去重，每个单词只出现一次（要么在新词，要么在复习中）
 
@@ -332,18 +332,17 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     # 1. 今日会话中的所有单词 ID
     new_word_ids = get_today_word_ids()
 
-    # 2. "新词" = 今日会话中但无 learning_records 的词
-    if new_word_ids:
-        placeholders = ",".join("?" * len(new_word_ids))
-        reviewed_ids = conn.execute(
-            f"SELECT DISTINCT word_id FROM learning_records "
-            f"WHERE word_id IN ({placeholders})",
-            new_word_ids,
-        ).fetchall()
-        reviewed_set = {r["word_id"] for r in reviewed_ids}
-        new_word_ids = [wid for wid in new_word_ids if wid not in reviewed_set]
+    # 2. 获取本次已测试的词（从 test_progress 中提取）
+    session = get_today_session()
+    tested_ids_from_progress = set()
+    if session and session.test_progress:
+        # 只提取数字 ID，忽略字符串标记（如 "_daily_test_count:N"）
+        tested_ids_from_progress = {item for item in session.test_progress if isinstance(item, int)}
 
-    # 3. 到期复习单词（全局筛选，不限会话，按到期日升序）
+    # 3. "新词" = 今日会话中但尚未答过的词（不在 test_progress 中）
+    new_word_ids = [wid for wid in new_word_ids if wid not in tested_ids_from_progress]
+
+    # 4. 到期复习单词（全局筛选，不限会话，按到期日升序，同样过滤已答过的）
     overdue_rows = conn.execute(
         """SELECT word_id, MIN(next_review_date) AS min_date
            FROM learning_records
@@ -352,9 +351,9 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
            ORDER BY min_date ASC, word_id ASC""",
         (today,),
     ).fetchall()
-    review_word_ids = [r["word_id"] for r in overdue_rows]
+    review_word_ids = [r["word_id"] for r in overdue_rows if r["word_id"] not in tested_ids_from_progress]
 
-    # 4. 合并去重（新词优先，复习补充）
+    # 5. 合并去重（新词优先，复习补充）
     all_ids = list(new_word_ids)
     for wid in review_word_ids:
         if wid not in all_ids:
@@ -363,18 +362,9 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     if not all_ids:
         return []
 
-    # 5. 限制数量
+    # 6. 限制数量
     if max_size is not None:
         all_ids = all_ids[:max_size]
-    else:
-        # 过滤已测试的词（崩溃恢复）
-        session = get_today_session()
-        if session and session.test_progress:
-            # 只提取数字 ID，忽略字符串标记（如 "_daily_test_count:N"）
-            tested_ids = [item for item in session.test_progress if isinstance(item, int)]
-            all_ids = [wid for wid in all_ids if wid not in tested_ids]
-            if not all_ids:
-                return []
 
     words = get_words_by_ids(all_ids)
     # 按 ID 顺序保持队列顺序

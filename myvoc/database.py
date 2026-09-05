@@ -14,6 +14,16 @@ _DEFAULT_DB = _DEFAULT_DIR / "myvoc.db"
 
 def get_db_path() -> Path:
     """获取数据库文件路径（可被 config 覆盖）"""
+    from myvoc.config import get as conf_get
+
+    custom_path = conf_get("database.path", "")
+    if custom_path:
+        path = Path(custom_path)
+        # 支持相对路径（相对于项目根目录）
+        if not path.is_absolute():
+            project_root = Path(__file__).parent.parent
+            path = project_root / path
+        return path
     return _DEFAULT_DB
 
 
