@@ -133,16 +133,28 @@ def _paginate_page(
 
     rows = _conn().execute(sql, params).fetchall()
 
-    # ---- 2. 统计总数（复用 WHERE，去掉 LIMIT/OFFSET） ----
-    where_idx = sql.find(" ORDER BY ")
-    if where_idx == -1:
-        count_part = sql
-    else:
-        count_part = sql[:where_idx]
+    # ---- 2. 统计总数（直接构建，避免 rfind 在子查询上找错 FROM） ----
+    # 阶段过滤：需要预查出符合条件的 word_id 集合
+    stage_ids: list[int] = []
+    if min_stage > 0:
+        stage_ids = _ids_with_stage(_conn(), min_stage)
+        if not stage_ids:
+            return [], 0
 
-    # 用 SELECT COUNT(DISTINCT w.id) 替换首行
-    count_sql = "SELECT COUNT(DISTINCT w.id) FROM " + count_part[sql.find(" FROM "):]
-    total = _conn().execute(count_sql, params[:-2]).fetchone()[0]
+    # 构建 COUNT 查询，复用相同的 WHERE 过滤逻辑
+    count_sql = "SELECT COUNT(*) FROM words w"
+    count_params: list = []
+    where_clauses = []
+    if search:
+        where_clauses.append("(LOWER(w.word) LIKE ? OR LOWER(w.meaning) LIKE ?)")
+        count_params.extend([f"%{search}%", f"%{search}%"])
+    if stage_ids:
+        placeholders = ",".join("?" * len(stage_ids))
+        where_clauses.append(f"w.id IN ({placeholders})")
+        count_params.extend(stage_ids)
+    if where_clauses:
+        count_sql += " WHERE " + " AND ".join(where_clauses)
+    total = _conn().execute(count_sql, count_params).fetchone()[0]
     return rows, total
 
 
