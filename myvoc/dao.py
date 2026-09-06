@@ -147,6 +147,7 @@ def update_record(word_id: int, is_correct: bool, learn_date: date | None = None
 
     from myvoc.config import get as conf_get
     base_intervals = conf_get("ebbinghaus.base_intervals", [0, 1, 2, 4, 7, 15, 30])
+    max_stage = conf_get("ebbinghaus.max_stage", 7)
     ease_lower = 1.3
 
     # 查找该单词的最新记录（不按 learn_date 过滤，只按 id 倒序）
@@ -172,31 +173,46 @@ def update_record(word_id: int, is_correct: bool, learn_date: date | None = None
     review_base = learn_date.isoformat()
 
     if is_correct:
-        new_stage = record.stage + 1
+        new_stage = min(record.stage + 1, max_stage)
+        if new_stage >= max_stage:
+            # 已毕业：大幅延后复习日期（最后一个间隔的3倍）
+            new_interval = base_intervals[-1] * 3
+            conn.execute(
+                """UPDATE learning_records SET
+                   stage = ?, interval = ?,
+                   next_review_date = date(?, '+' || ? || ' days'),
+                   correct_count = correct_count + 1,
+                   last_result = 'correct',
+                   last_review_at = datetime('now')
+                   WHERE id = ?""",
+                (new_stage, new_interval, review_base, new_interval, record.id),
+            )
+        else:
+            new_interval = base_intervals[min(new_stage, len(base_intervals) - 1)]
+            conn.execute(
+                """UPDATE learning_records SET
+                   stage = ?, ease_factor = ?, interval = ?,
+                   next_review_date = date(?, '+' || ? || ' days'),
+                   correct_count = correct_count + 1,
+                   last_result = 'correct',
+                   last_review_at = datetime('now')
+                   WHERE id = ?""",
+                (new_stage, record.ease_factor, new_interval,
+                 review_base, new_interval, record.id),
+            )
+    else:
+        new_stage = max(0, record.stage - 1)
+        new_ease = max(ease_lower, record.ease_factor - 0.1)
         new_interval = base_intervals[min(new_stage, len(base_intervals) - 1)]
         conn.execute(
             """UPDATE learning_records SET
                stage = ?, ease_factor = ?, interval = ?,
                next_review_date = date(?, '+' || ? || ' days'),
-               correct_count = correct_count + 1,
-               last_result = 'correct',
-               last_review_at = datetime('now')
-               WHERE id = ?""",
-            (new_stage, record.ease_factor, new_interval,
-             review_base, new_interval, record.id),
-        )
-    else:
-        new_stage = max(0, record.stage - 2)
-        new_ease = max(ease_lower, record.ease_factor - 0.2)
-        conn.execute(
-            """UPDATE learning_records SET
-               stage = ?, ease_factor = ?, interval = 1,
-               next_review_date = date(?, '+1 day'),
                wrong_count = wrong_count + 1,
                last_result = 'wrong',
                last_review_at = datetime('now')
                WHERE id = ?""",
-            (new_stage, new_ease, review_base, record.id),
+            (new_stage, new_ease, new_interval, review_base, new_interval, record.id),
         )
 
     conn.commit()
@@ -329,6 +345,9 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     today = date.today().isoformat()
     conn = _conn()
 
+    from myvoc.config import get as conf_get
+    max_stage = conf_get("ebbinghaus.max_stage", 7)
+
     # 1. 今日会话中的所有单词 ID
     new_word_ids = get_today_word_ids()
 
@@ -342,14 +361,14 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     # 3. "新词" = 今日会话中但尚未答过的词（不在 test_progress 中）
     new_word_ids = [wid for wid in new_word_ids if wid not in tested_ids_from_progress]
 
-    # 4. 到期复习单词（全局筛选，不限会话，按到期日升序，同样过滤已答过的）
+    # 4. 到期复习单词（全局筛选，不限会话，按到期日升序，排除已毕业）
     overdue_rows = conn.execute(
         """SELECT word_id, MIN(next_review_date) AS min_date
            FROM learning_records
-           WHERE next_review_date <= ?
+           WHERE next_review_date <= ? AND stage < ?
            GROUP BY word_id
            ORDER BY min_date ASC, word_id ASC""",
-        (today,),
+        (today, max_stage),
     ).fetchall()
     review_word_ids = [r["word_id"] for r in overdue_rows if r["word_id"] not in tested_ids_from_progress]
 

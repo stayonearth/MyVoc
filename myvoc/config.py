@@ -38,6 +38,10 @@ _DEFAULTS = {
     "database": {
         "path": "",  # 空字符串 → 使用默认路径
     },
+    "llm": {
+        "base_url": "",
+        "model": "qwen36-local",
+    },
 }
 
 _config: dict = {}
