@@ -1,11 +1,12 @@
 """CLI 入口 — Click 命令定义
 
-MVP 阶段只有 add 命令，后续逐步加入 learn/test/today/status。
+MVP 阶段只有 add 命令,后续逐步加入 learn/test/today/status。
 """
 
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import click
 
@@ -560,23 +561,274 @@ def _print_srs_intro(console: "Console") -> None:
 
     console.print("[bold]每次考核的影响：[/bold]")
     console.print("  答对 -> 进入下一阶段，间隔按 base_intervals 递增")
-    console.print("  答错 -> 退回 2 个阶段，难度系数 -0.2（下次间隔变短）")
+    console.print("  答错 -> 退回 1 个阶段，难度系数 -0.1，间隔按新阶段对应值重新计算")
+    console.print("  连续答对 -> 达到阶段 7 视为已毕业，复习间隔大幅延长至 90 天")
     console.print("  难度系数越小，复习间隔越短，系统会更频繁地考你\n")
 
     console.print("[bold]给你的学习建议：[/bold]")
     console.print("  1. 每天坚持，不要积累大量到期单词 — 每天少量复习效果最好")
-    console.print("  2. 答错了不要沮丧，退回 2 阶意味着系统认为你需要更多练习")
+    console.print("  2. 答错了不要沮丧，退回 1 阶意味着系统认为你需要更多练习")
     console.print("  3. 如果某个词反复出错，尝试联想记忆法（编故事、拆词根）")
     console.print("  4. 录入新词时尽量用完整释义，避免只记片段的浅层记忆")
     console.print("  5. 用 [cyan]myvoc status[/cyan] 定期查看学习状态，及时调整节奏")
 
 
+def _collect_status_data(conn: sqlite3.Connection) -> dict:
+    """收集用于 LLM 分析的结构化数据"""
+    today = date.today().isoformat()
+
+    # 系统概览
+    row = conn.execute(
+        "SELECT COUNT(*) as wc, "
+        "(SELECT COUNT(*) FROM learning_records) as rc, "
+        "(SELECT COUNT(DISTINCT word_id) FROM learning_records) as learned, "
+        "(SELECT COUNT(DISTINCT id) FROM daily_sessions) as sc "
+        "FROM words"
+    ).fetchone()
+    data: dict = {"overview": dict(row)}
+
+    # 阶段分布
+    data["stage_distribution"] = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT stage, COUNT(*) as cnt FROM learning_records GROUP BY stage ORDER BY stage"
+        ).fetchall()
+    ]
+
+    # 单词掌握程度（各阶段单词的正确率统计）
+    data["mastery_by_stage"] = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT stage, COUNT(*) as words, "
+            "COALESCE(SUM(correct_count),0) as total_correct, "
+            "COALESCE(SUM(wrong_count),0) as total_wrong "
+            "FROM learning_records GROUP BY stage ORDER BY stage"
+        ).fetchall()
+    ]
+
+    # 最常错的 10 个词
+    data["top_10_wrong"] = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT w.word, w.meaning, lr.correct_count, lr.wrong_count, "
+            "lr.stage, lr.next_review_date "
+            "FROM learning_records lr "
+            "JOIN words w ON lr.word_id = w.id "
+            "WHERE lr.wrong_count > 0 "
+            "ORDER BY lr.wrong_count DESC LIMIT 10"
+        ).fetchall()
+    ]
+
+    # 到期复习统计
+    row = conn.execute(
+        "SELECT COUNT(*) as overdue, "
+        "SUM(CASE WHEN stage = 0 THEN 1 ELSE 0 END) as new_due "
+        "FROM learning_records WHERE next_review_date <= ?",
+        (today,),
+    ).fetchone()
+    data["due_today"] = dict(row)
+
+    # SRS 配置
+    from myvoc.config import get as conf_get
+    data["config"] = {
+        "base_intervals": conf_get("ebbinghaus.base_intervals", [0, 1, 2, 4, 7, 15, 30]),
+        "max_stage": conf_get("ebbinghaus.max_stage", 7),
+    }
+
+    return data
+
+
+def _run_llm_analysis(conn: sqlite3.Connection, console, stream: bool = True) -> None:
+    """调用本地 LLM 对学习数据进行深度分析
+
+    Args:
+        conn: 数据库连接
+        console: Rich Console 对象
+        stream: 是否使用流式输出（默认 True）
+    """
+    from myvoc.config import get as conf_get
+
+    base_url = conf_get("llm.base_url", "")
+    model = conf_get("llm.model", "qwen36-local")
+
+    if not base_url:
+        console.print(
+            "[yellow]未配置 LLM 地址，跳过分析。[/yellow]\n"
+            "请在 config.json 中设置：\"llm\": {\"base_url\": \"http://...\"}"
+        )
+        return
+
+    data = _collect_status_data(conn)
+    prompt = (
+        "你是一名专业的英语学习顾问。以下是一名学习者的单词记忆训练数据，"
+        "请进行深度分析并给出建议。\n\n"
+        "## 学习数据\n"
+        f"{json.dumps(data, ensure_ascii=False, indent=2)}\n\n"
+        "请从以下维度分析：\n"
+        "1. **总体进度评估**：当前词汇掌握程度、学习效率\n"
+        "2. **薄弱环节识别**：哪些阶段/哪些单词需要重点加强\n"
+        "3. **进度预测**：以当前平均每天新词数和复习正确率，估算完成"
+        "【高中词汇约 3500 词】、【四级词汇约 4500 词】、"
+        "【六级词汇约 6000 词】分别需要多长时间\n"
+        "4. **具体学习建议**：基于数据的针对性建议（如每日新词量、复习策略、错题处理方法等）\n\n"
+        "请用中文回答，分点列出，建议具体可操作。"
+    )
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key="not-needed", base_url=base_url)
+
+        if stream:
+            # 流式输出模式
+            _run_llm_analysis_streaming(client, model, prompt, console)
+        else:
+            # 非流式输出模式（原有逻辑）
+            _run_llm_analysis_blocking(client, model, prompt, console)
+
+    except Exception as e:
+        console.print(f"[yellow]LLM 分析失败: {e}[/yellow]")
+
+
+def _run_llm_analysis_streaming(client, model: str, prompt: str, console) -> None:
+    """流式输出 LLM 分析结果"""
+    import re
+
+    console.print("[dim]正在分析，实时显示推理过程...[/dim]\n")
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=8192,  # 增加 token 限制，确保完整输出
+        stream=True
+    )
+
+    full_content = ""
+    full_reasoning = ""
+    has_content = False
+    reasoning_mode = False
+
+    # 用于统计中文字符，判断何时开始显示（跳过英文思考过程）
+    chinese_char_count = 0
+    started_output = False
+    output_buffer = []  # 用于缓冲输出
+
+    for chunk in stream:
+        if not chunk.choices:
+            continue
+
+        delta = chunk.choices[0].delta
+
+        # 检查 content 字段
+        if hasattr(delta, 'content') and delta.content:
+            has_content = True
+            content_chunk = delta.content
+            full_content += content_chunk
+            console.print(content_chunk, end="", style="green")
+
+        # 检查 reasoning 字段（推理模型）
+        if hasattr(delta, 'reasoning') and delta.reasoning:
+            reasoning_mode = True
+            reasoning_chunk = delta.reasoning
+            full_reasoning += reasoning_chunk
+
+            # 统计这一块中的中文字符
+            chinese_chars_in_chunk = len(re.findall(r'[一-鿿]', reasoning_chunk))
+            chinese_char_count += chinese_chars_in_chunk
+
+            # 当累积了足够的中文字符时，开始输出（跳过英文思考过程）
+            if not started_output and chinese_char_count > 50:
+                started_output = True
+                console.print("[dim]（推理模式：实时显示分析内容）[/dim]\n", style="cyan")
+                # 输出缓冲区中的内容
+                for buffered_chunk in output_buffer:
+                    console.print(buffered_chunk, end="")
+                output_buffer.clear()
+
+            if started_output:
+                # 已经开始输出，显示所有内容（包括中文和标点符号）
+                console.print(reasoning_chunk, end="")
+            else:
+                # 还没开始输出，先缓冲
+                output_buffer.append(reasoning_chunk)
+                # 限制缓冲区大小
+                if len(output_buffer) > 100:
+                    output_buffer.pop(0)
+
+    console.print("\n")
+
+    # 检查是否输出了内容
+    if reasoning_mode and not started_output:
+        console.print("[dim]注意：推理内容较少，直接显示...[/dim]\n")
+        console.print(full_reasoning)
+
+    # 显示完成提示
+    if full_content or full_reasoning:
+        console.print(f"\n[dim]分析完成（生成了 {len(full_content) + len(full_reasoning)} 字符）[/dim]")
+
+
+
+def _run_llm_analysis_blocking(client, model: str, prompt: str, console) -> None:
+    """非流式输出 LLM 分析结果（原有逻辑）"""
+    import re
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.7,
+        max_tokens=4096,
+    )
+    message = response.choices[0].message
+
+    # 处理推理模型的响应
+    analysis = None
+    if message.content and message.content.strip():
+        # 标准模型返回 content
+        analysis = message.content.strip()
+    elif hasattr(message, 'reasoning') and message.reasoning:
+        # 推理模型只返回 reasoning 字段
+        reasoning_text = message.reasoning.strip()
+        console.print("[dim]注意：使用的是推理模型，已提取分析结果[/dim]\n")
+        analysis = _extract_chinese_answer(reasoning_text)
+
+    if analysis:
+        console.print(analysis)
+    else:
+        console.print("[yellow]LLM 返回了空响应[/yellow]")
+
+
+def _extract_chinese_answer(reasoning_text: str) -> str:
+    """从推理文本中提取中文答案部分"""
+    import re
+
+    # 分割成段落，找最后几段中文为主的内容
+    paragraphs = [p.strip() for p in reasoning_text.split('\n\n') if p.strip()]
+
+    # 从后往前查找包含大量中文的段落（可能是最终答案）
+    chinese_paragraphs = []
+    for p in reversed(paragraphs[-10:]):  # 只看最后10段
+        # 统计中文字符比例
+        chinese_chars = len(re.findall(r'[一-鿿]', p))
+        if chinese_chars > 50:  # 至少50个中文字符
+            chinese_paragraphs.insert(0, p)
+
+    if chinese_paragraphs:
+        # 找到了可能的答案段落
+        return '\n\n'.join(chinese_paragraphs)
+    else:
+        # 没找到，返回全部 reasoning
+        return reasoning_text
+
+
 @cli.command()
-def status() -> None:
+@click.option("--analyze", is_flag=True, help="使用本地 LLM 分析学习数据并给出建议")
+def status(analyze: bool) -> None:
     """查看当前学习状态统计
 
     显示词汇概况、阶段分布、常错词、到期复习提醒，
     以及艾宾浩斯间隔重复方法说明。
+
+    使用 --analyze 可启用本地 LLM 分析学习数据并生成个性化建议。
     """
     from datetime import date
     from myvoc.database import init_db
@@ -770,6 +1022,12 @@ def status() -> None:
     # ========================= 7. 艾宾浩斯方法介绍 =========================
     console.print()
     _print_srs_intro(console)
+
+    # ========================= 8. LLM 学习分析（可选） =========================
+    if analyze:
+        console.print()
+        console.rule("[bold]🤖 学习数据分析[/bold]")
+        _run_llm_analysis(conn, console)
 
 
 # ---------------------------------------------------------------------------
