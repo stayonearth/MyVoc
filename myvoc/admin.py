@@ -21,6 +21,9 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 
 try:
+    from myvoc.config import load_config
+
+    load_config()
     from myvoc.database import get_db_path
 
     DB_PATH = Path(str(get_db_path()))
