@@ -282,20 +282,38 @@ def save_test_progress(word_ids: list[int], daily_test_count: int | None = None)
     在 test_progress JSON 数组中额外存入 "_daily_test_count:N" 标记，
     用于跨调用统计当日已测试的单词总数。
 
+    **跨调用累加**：同一天的多次 test 调用中，已测试的单词 ID 和计数会累积保存，
+    避免被后续调用覆盖。
+
     参数:
-        word_ids: 已测试的单词 ID 列表
-        daily_test_count: 可选，手动指定当日总测试数（不传则自动计算 len(word_ids)）
+        word_ids: 本次测试中已作答的单词 ID 列表
+        daily_test_count: 可选，手动指定当日总测试数（不传则自动累加计算）
     """
     conn = _conn()
     today = date.today().isoformat()
-    count = daily_test_count if daily_test_count is not None else len(word_ids)
-    # 将每日计数标记追加到数组末尾，格式: "_daily_test_count:N"
-    progress = list(word_ids)
-    progress.append(f"_daily_test_count:{count}")
 
+    # 读取已有进度，用于跨调用累加
     cur = conn.execute(
-        "SELECT id FROM daily_sessions WHERE session_date = ?", (today,)
+        "SELECT test_progress FROM daily_sessions WHERE session_date = ?", (today,)
     ).fetchone()
+    existing_progress = json.loads(cur["test_progress"]) if cur else []
+    existing_word_ids = {item for item in existing_progress if isinstance(item, int)}
+    existing_daily_count = 0
+    for item in existing_progress:
+        if isinstance(item, str) and item.startswith("_daily_test_count:"):
+            try:
+                existing_daily_count = int(item.split(":", 1)[1])
+            except (ValueError, IndexError):
+                pass
+
+    # 累加：只保留新出现的单词 ID，计算累积的每日测试总数
+    new_word_ids = [wid for wid in word_ids if wid not in existing_word_ids]
+    accumulated_count = existing_daily_count + len(new_word_ids)
+
+    # 保存累积计数和合并后的单词 ID 列表
+    progress = list(existing_word_ids) + new_word_ids
+    progress.append(f"_daily_test_count:{accumulated_count}")
+
     if cur:
         conn.execute(
             "UPDATE daily_sessions SET test_progress = ? WHERE session_date = ?",
