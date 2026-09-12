@@ -379,13 +379,21 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     # 3. "新词" = 今日会话中但尚未答过的词（不在 test_progress 中）
     new_word_ids = [wid for wid in new_word_ids if wid not in tested_ids_from_progress]
 
-    # 4. 到期复习单词（全局筛选，不限会话，按到期日升序，排除已毕业）
+    # 4. 到期复习单词（基于每个单词的最新学习记录，按到期日升序，排除已毕业）
+    #    使用 INNER JOIN + 子查询找到每个 word_id 的最新记录（MAX id），
+    #    避免旧记录的过期日期被 MIN() 选中导致已毕业单词被误拉。
     overdue_rows = conn.execute(
-        """SELECT word_id, MIN(next_review_date) AS min_date
-           FROM learning_records
-           WHERE next_review_date <= ? AND stage < ?
-           GROUP BY word_id
-           ORDER BY min_date ASC, word_id ASC""",
+        """SELECT lr.word_id, lr.next_review_date AS min_date
+           FROM learning_records lr
+           INNER JOIN (
+               SELECT word_id, MAX(id) AS latest_id
+               FROM learning_records
+               GROUP BY word_id
+           ) latest
+           ON lr.id = latest.latest_id
+           WHERE lr.next_review_date <= ?
+             AND lr.stage < ?
+           ORDER BY lr.next_review_date ASC, lr.word_id ASC""",
         (today, max_stage),
     ).fetchall()
     review_word_ids = [r["word_id"] for r in overdue_rows if r["word_id"] not in tested_ids_from_progress]
