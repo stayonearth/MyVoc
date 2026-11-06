@@ -47,7 +47,7 @@ def add(skip_unknown: bool) -> None:
 
     while True:
         # 先输出提示符（Rich Console 会自动 flush stdout）
-        console.print("\n(输入单词，或 Ctrl+Z 结束) → ", soft_wrap=True, end="")
+        console.print("\n(输入单词，或 Ctrl+D 结束) → ", soft_wrap=True, end="")
         try:
             # input() 的 EOFError 最可靠，且与 Rich 输出不冲突
             line = input()
@@ -90,7 +90,8 @@ def add(skip_unknown: bool) -> None:
 
     # 创建会话
     if added:
-        create_session(added)
+        session_id = create_session(added)
+        click.echo(f"[会话] 今日新增 {len(added)} 词 → session_id={session_id}")
 
     click.echo()
     click.echo("=" * 50)
@@ -126,9 +127,32 @@ def _read_key_manual(console: "Console", current_idx: int, word_count: int) -> i
 
     返回 -1 表示退出。
     返回 word_count 表示已到达末尾。
-    """
-    import msvcrt
 
+    跨平台实现：Windows 用 msvcrt，Linux/macOS 用 tty + termios。
+    """
+    import platform
+
+    if platform.system() == "Windows":
+        import msvcrt
+        return _read_key_windows(console, current_idx, word_count, msvcrt)
+
+    # Linux / macOS: 用 tty + termios 读取原始按键
+    import select
+    import sys
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        return _read_key_unix(console, current_idx, word_count)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def _read_key_windows(console, current_idx: int, word_count: int, msvcrt) -> int:
+    """Windows 实现：通过 msvcrt 读取按键"""
     while True:
         key = msvcrt.getch()
 
@@ -166,6 +190,80 @@ def _read_key_manual(console: "Console", current_idx: int, word_count: int) -> i
             if current_idx >= word_count - 1:
                 return word_count  # 已到最后一个，退出循环
             return current_idx + 1
+
+
+def _read_key_unix(console, current_idx: int, word_count: int) -> int:
+    """Linux/macOS 实现：通过 tty 原始模式读取按键"""
+    import select
+    import sys
+
+    while True:
+        # 等待按键输入（阻塞）
+        ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if not ready:
+            # 超时，继续循环（用于 console.print 的并发输出）
+            continue
+
+        key = sys.stdin.buffer.read(1)
+        if not key:
+            continue
+
+        # ── 普通字符 ──────────────────────────────
+        if key not in (b'\x00', b'\xe0'):
+            # Enter 键
+            if key in (b'\x0d', b'\x0a'):
+                if current_idx >= word_count - 1:
+                    return word_count
+                return current_idx + 1
+            ch = key.decode('ascii', errors='ignore').lower()
+            if ch == 'q':
+                console.print("\n已退出背诵模式。")
+                return -1
+
+        # ── 扩展键（方向键 / 翻页键）──────────────
+        # Unix 终端以 ESC 序列发送方向键: ESC [ A/B/C/D 等
+        peek = sys.stdin.buffer.read(1)
+        if not peek:
+            continue
+
+        peek2 = sys.stdin.buffer.read(1)
+
+        # ESC [ A = ↑, B = ↓, C = →, D = ←
+        if key == b'\x1b' and peek == b'[':
+            combo = key + peek + peek2
+            if peek2 == b'A':   # ↑
+                if current_idx > 0:
+                    return current_idx - 1
+                console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
+                return current_idx
+            if peek2 == b'B':   # ↓
+                if current_idx >= word_count - 1:
+                    return word_count
+                return current_idx + 1
+            if peek2 == b'C':   # →
+                if current_idx >= word_count - 1:
+                    return word_count
+                return current_idx + 1
+            if peek2 == b'D':   # ←
+                if current_idx > 0:
+                    return current_idx - 1
+                console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
+                return current_idx
+
+        # PgUp = ESC [ 5 ~, PgDn = ESC [ 6 ~
+        if peek2 in (b'5', b'6'):
+            combo = key + peek + peek2
+            if peek2 == b'5':   # PgUp
+                if current_idx > 0:
+                    return current_idx - 1
+                console.print("\n[dim]已在第一个单词，无法上翻[/dim]")
+                return current_idx
+            if peek2 == b'6':   # PgDn
+                if current_idx >= word_count - 1:
+                    return word_count
+                return current_idx + 1
+
+        # 其他组合键：丢弃额外字节后重试
 
 
 @cli.command()
@@ -467,20 +565,18 @@ def addaudio(count: int | None, force: bool) -> None:
       myvoc addaudio --count 10    # 只补全前 10 个（从今天新词开始）
       myvoc addaudio -f --count 10 # 强制模式下只补全前 10 个
     """
-    from myvoc.dao import get_all_words, update_audio_url, update_word_phonetic
+    from myvoc.dao import get_today_word_ids, get_words_by_ids, update_audio_url, update_word_phonetic
     from myvoc.dictionary import fetch_audio_url
-    from datetime import date
     import time
 
-    words = get_all_words()
-
-    # 如果不是强制模式，只处理今天新添加的单词
     if not force:
-        today = date.today().isoformat()
-        words = [w for w in words if w.created_at and w.created_at.startswith(today)]
-        if not words:
+        word_ids = get_today_word_ids()
+        if not word_ids:
             click.echo("今天没有新添加的单词，使用 -f 参数处理所有单词")
             return
+        words = get_words_by_ids(word_ids)
+    else:
+        words = get_all_words()
 
     if count:
         words = words[:count]
@@ -619,13 +715,36 @@ def _collect_status_data(conn: sqlite3.Connection) -> dict:
         ).fetchall()
     ]
 
-    # 到期复习统计
-    row = conn.execute(
-        "SELECT COUNT(*) as overdue, "
-        "SUM(CASE WHEN stage = 0 THEN 1 ELSE 0 END) as new_due "
-        "FROM learning_records WHERE next_review_date <= ?",
-        (today,),
+    # 到期复习统计：排除今日新词（同 status 命令的过滤逻辑）
+    # 使用 INNER JOIN + MAX(id) 只取每个单词的最新记录，与 get_test_queue() 一致
+    from myvoc.config import get as conf_get
+    max_stage = conf_get("ebbinghaus.max_stage", 7)
+
+    session_row = conn.execute(
+        "SELECT word_ids FROM daily_sessions WHERE session_date = ?", (today,)
     ).fetchone()
+    new_ids_set = set()
+    if session_row and session_row["word_ids"]:
+        import json as _json
+        new_ids_set = set(_json.loads(session_row["word_ids"]))
+
+    base = (
+        "SELECT COUNT(*) as overdue "
+        "FROM learning_records lr "
+        "INNER JOIN ("
+        "    SELECT word_id, MAX(id) AS latest_id "
+        "    FROM learning_records GROUP BY word_id"
+        ") latest ON lr.id = latest.latest_id "
+        "WHERE lr.next_review_date <= ? AND lr.stage < ?"
+    )
+    if new_ids_set:
+        placeholders = ",".join("?" * len(new_ids_set))
+        row = conn.execute(
+            base + f" AND lr.word_id NOT IN ({placeholders})",
+            (today, max_stage,) + tuple(new_ids_set),
+        ).fetchone()
+    else:
+        row = conn.execute(base, (today, max_stage)).fetchone()
     data["due_today"] = dict(row)
 
     # SRS 配置
@@ -891,10 +1010,45 @@ def status(analyze: bool) -> None:
     # ========================= 3. 到期复习 & 新词 =========================
     console.rule("[bold]复习提醒[/bold]")
 
-    overdue_rows = conn.execute(
-        """SELECT COUNT(*) AS cnt FROM learning_records
-           WHERE next_review_date <= ?""", (today_str,)
-    ).fetchone()
+    from myvoc.config import get as conf_get
+    max_stage = conf_get("ebbinghaus.max_stage", 7)
+
+    # 获取今日新词 ID（用于排除，使 status 与 test 策略一致）
+    # word_ids 存储为 JSON 字符串，需解析
+    new_ids_set = set()
+    if session and session["word_ids"]:
+        new_ids_set = set(json.loads(session["word_ids"]))
+
+    # 到期复习数：排除今日新词，只统计真正的复习单词
+    # 使用 INNER JOIN + MAX(id) 子查询，与 get_test_queue() 保持一致：
+    # 只取每个单词的「最新学习记录」，避免旧 stage 记录（如 stage 0）干扰计数
+    if new_ids_set:
+        placeholders = ",".join("?" * len(new_ids_set))
+        overdue_rows = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM learning_records lr
+               INNER JOIN (
+                   SELECT word_id, MAX(id) AS latest_id
+                   FROM learning_records
+                   GROUP BY word_id
+               ) latest ON lr.id = latest.latest_id
+               WHERE lr.next_review_date <= ?
+                 AND lr.stage < ?
+                 AND lr.word_id NOT IN ({})""".format(placeholders),
+            (today_str, max_stage,) + tuple(new_ids_set),
+        ).fetchone()
+    else:
+        overdue_rows = conn.execute(
+            """SELECT COUNT(*) AS cnt FROM learning_records lr
+               INNER JOIN (
+                   SELECT word_id, MAX(id) AS latest_id
+                   FROM learning_records
+                   GROUP BY word_id
+               ) latest ON lr.id = latest.latest_id
+               WHERE lr.next_review_date <= ?
+                 AND lr.stage < ?""",
+            (today_str, max_stage),
+        ).fetchone()
+    actual_overdue = overdue_rows["cnt"]
 
     # 新词 = 今日会话中但无学习记录的
     new_count = 0
@@ -911,7 +1065,7 @@ def status(analyze: bool) -> None:
         else:
             new_count = 0
 
-    console.print(f"  到期需复习：[bold]{overdue_rows['cnt']}[/bold] 个")
+    console.print(f"  到期需复习：[bold]{actual_overdue}[/bold] 个")
     console.print(f"  新词待学：  [bold]{new_count}[/bold] 个\n")
 
     # ========================= 4. 最常错的词 =========================
@@ -1002,15 +1156,42 @@ def status(analyze: bool) -> None:
         console.print()
         console.rule("[bold]到期待复习的单词")
         max_show = 20
-        review_words = conn.execute(
-            """SELECT w.word, w.meaning, lr.stage, lr.next_review_date
-               FROM learning_records lr
-               JOIN words w ON lr.word_id = w.id
-               WHERE lr.next_review_date <= ?
-               ORDER BY lr.stage ASC, lr.next_review_date ASC
-               LIMIT ?""",
-            (today_str, max_show),
-        ).fetchall()
+        # 复用相同过滤条件：INNER JOIN + MAX(id) 只取最新记录，
+        # 排除今日新词，保持与"到期需复习"计数一致
+        if new_ids_set:
+            placeholders = ",".join("?" * len(new_ids_set))
+            review_words = conn.execute(
+                f"""SELECT w.word, w.meaning, lr.stage, lr.next_review_date
+                    FROM learning_records lr
+                    INNER JOIN (
+                        SELECT word_id, MAX(id) AS latest_id
+                        FROM learning_records
+                        GROUP BY word_id
+                    ) latest ON lr.id = latest.latest_id
+                    JOIN words w ON lr.word_id = w.id
+                    WHERE lr.next_review_date <= ?
+                      AND lr.stage < ?
+                      AND lr.word_id NOT IN ({placeholders})
+                    ORDER BY lr.next_review_date ASC, lr.word_id ASC
+                    LIMIT ?""",
+                (today_str, max_stage,) + tuple(new_ids_set) + (max_show,),
+            ).fetchall()
+        else:
+            review_words = conn.execute(
+                """SELECT w.word, w.meaning, lr.stage, lr.next_review_date
+                   FROM learning_records lr
+                   INNER JOIN (
+                       SELECT word_id, MAX(id) AS latest_id
+                       FROM learning_records
+                       GROUP BY word_id
+                   ) latest ON lr.id = latest.latest_id
+                   JOIN words w ON lr.word_id = w.id
+                   WHERE lr.next_review_date <= ?
+                     AND lr.stage < ?
+                   ORDER BY lr.next_review_date ASC, lr.word_id ASC
+                   LIMIT ?""",
+                (today_str, max_stage, max_show),
+            ).fetchall()
 
         if len(review_words) > max_show:
             console.print(f"  共 {overdue_rows['cnt']} 个到期，仅显示前 {max_show} 个：\n")

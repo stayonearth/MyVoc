@@ -75,6 +75,22 @@ def get_words_by_ids(word_ids: list[int]) -> list[Word]:
     return [Word(**dict(r)) for r in rows]
 
 
+def get_today_word_ids() -> list[int]:
+    """获取今天会话的单词 ID 列表（用于 addaudio 等命令）
+
+    使用 daily_sessions.session_date（date.today() 本地日期）而非
+    words.created_at（UTC），避免跨时区导致"找不到今天的新词"。
+    """
+    conn = _conn()
+    today = date.today().isoformat()
+    row = conn.execute(
+        "SELECT word_ids FROM daily_sessions WHERE session_date = ?", (today,)
+    ).fetchone()
+    if row and row["word_ids"]:
+        return json.loads(row["word_ids"])
+    return []
+
+
 def get_all_words() -> list[Word]:
     """获取所有单词（按 id 排序）"""
     conn = _conn()
@@ -257,6 +273,22 @@ def create_session(word_names: list[str]) -> int:
         new_session_id = cursor.lastrowid
 
     conn.commit()
+
+    # 验证：确保 word_ids 确实被写入了
+    if word_ids:
+        verify = conn.execute(
+            "SELECT word_ids FROM daily_sessions WHERE session_date = ?", (today,)
+        ).fetchone()
+        if verify:
+            verified_ids = json.loads(verify["word_ids"] or "[]")
+            if not verified_ids and word_ids:
+                # 写入似乎失效了，重试一次
+                conn.execute(
+                    "UPDATE daily_sessions SET word_ids = ?, total_words = ? WHERE session_date = ?",
+                    (json.dumps(word_ids), len(word_ids), today),
+                )
+                conn.commit()
+
     return new_session_id
 
 
@@ -379,7 +411,17 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     # 3. "新词" = 今日会话中但尚未答过的词（不在 test_progress 中）
     new_word_ids = [wid for wid in new_word_ids if wid not in tested_ids_from_progress]
 
-    # 4. 到期复习单词（基于每个单词的最新学习记录，按到期日升序，排除已毕业）
+    # 4. 回退：如果 word_ids 为空（例如 add 未正确写入 session），用 created_at 查找今日新增词
+    if not new_word_ids:
+        today_words = [
+            r["id"] for r in conn.execute(
+                "SELECT id FROM words WHERE date(created_at) = date(?)",
+                (today,),
+            ).fetchall()
+        ]
+        new_word_ids = [wid for wid in today_words if wid not in tested_ids_from_progress]
+
+    # 5. 到期复习单词（基于每个单词的最新学习记录，按到期日升序，排除已毕业）
     #    使用 INNER JOIN + 子查询找到每个 word_id 的最新记录（MAX id），
     #    避免旧记录的过期日期被 MIN() 选中导致已毕业单词被误拉。
     overdue_rows = conn.execute(
@@ -393,12 +435,16 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
            ON lr.id = latest.latest_id
            WHERE lr.next_review_date <= ?
              AND lr.stage < ?
-           ORDER BY lr.next_review_date ASC, lr.word_id ASC""",
+           ORDER BY
+               CASE WHEN lr.last_result = 'wrong' THEN 0 ELSE 1 END,
+               lr.last_review_at DESC,
+               lr.next_review_date ASC,
+               lr.word_id ASC""",
         (today, max_stage),
     ).fetchall()
     review_word_ids = [r["word_id"] for r in overdue_rows if r["word_id"] not in tested_ids_from_progress]
 
-    # 5. 合并去重（新词优先，复习补充）
+    # 6. 合并去重（新词优先，复习补充）
     all_ids = list(new_word_ids)
     for wid in review_word_ids:
         if wid not in all_ids:
@@ -407,7 +453,7 @@ def get_test_queue(max_size: int | None = None) -> list[Word]:
     if not all_ids:
         return []
 
-    # 6. 限制数量
+    # 7. 限制数量
     if max_size is not None:
         all_ids = all_ids[:max_size]
 
